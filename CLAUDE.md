@@ -31,7 +31,7 @@ so there is no anti-cheat concern.
 | Rogue quivers (only with the matching weapon, see section 8) | `[mercenary] equip` | **[confirmed]** (user: "all perfect and working") |
 | drop a dismissed merc's gear | `[mercenary] drop_items` | **[confirmed]** works with several worn items |
 | ring/amulet/boots/gloves/belt on mercs | - | **removed** (no panel slots, see section 8) |
-| Act 5 merc Whirlwind | - | idea only (section 11) |
+| Act 5 merc Whirlwind | `[mercenary] whirlwind` | **[confirmed]** travels and carves through packs (section 12); visual still ~0.1 s |
 
 ---------------------------------------------------------------------------------------------------------------------------------
 ## 2. Build, test, install
@@ -274,13 +274,24 @@ logging 9c/9d item packets in h_recv).
 - Live pets: the game's monster table is 128 chains at game+0x1320 (next unit at +0xe4); unit+0 type 1, +4 class, +0x10 mode (0 dying, 12 dead). Pet classes = MonStats classes named by Skills.txt `summon`.
   `qt_srv_tick` (hooked into the packet dispatcher, RVA 0x674ae, which gives (game, player) on the server thread) counts them every 2 s and writes `qol_summons.txt` (`NAME=skillid:count,...`) when it changes.
   Character name = unit+0x14 -> player data (name at +0), class = unit+4 (5 = Druid). Saving starts only after the restore finished (`g_scan_on`), so a fresh game can't overwrite the list.
-- Restore: `sum_step` (client, from h_recv) after a new game: wait 3 s and a known position, build jobs (wolves/fenris: min(count, Param3) casts; everything else once), zero costs, send select + cast spaced 150 ms / 950 ms,
+- Restore (movement does not matter): the loop casts at once, whatever the player is doing, unless her animation mode is a busy one (not 1/5 standing, 2/3/6 walking/running); success = the live count of that pet rose (`sum_count_alive`), otherwise recast after 1 s; only casts from a standstill count toward giving up (3 strikes), casts while moving don't. An earlier version that waited for her to stand still, and one that treated "moving" as "casting", both misbehaved.
+- Restore flow: `sum_step` (client, from h_recv) after a new game: wait 3 s and a known position, build jobs (wolves/fenris: min(count, Param3) casts; everything else once), zero costs, send select + cast spaced 150 ms / 950 ms,
   restore the previously selected skill (only known if the game sent a 0x3c earlier) and the costs.
 
-## 12. Deferred idea: Act 5 merc Whirlwind (data-only, unconfirmed)
-The user wants the Act 5 merc to use Whirlwind (PD2 has a whirlwind animation LoD lacks). Plan: add a `MonWhirlwind` row to loose `Skills.txt` (PD2 definition, new id) and a 5th skill slot with mode 14 for the Barbarian rows in loose
-`Hireling.txt`. `mSQ` is already 1 for act5hire1/2, and SQ skills replay A1 frames (the Desert Mercenary's Jab is mode 14 with no SQ files). Concern: the merc may disappear while whirlwinding if there are no frames for that mode; the user
-suggested borrowing animations from the Ancient boss who whirlwinds. Never started; the user said "let's revisit this after we fix the merc equip issue" (the equip work is done; this is the one thing left).
+## 12. Act 5 merc Whirlwind (`[mercenary] whirlwind`) - working
+- Data side (user's excel files, applied last into the data repo): one Act 5 merc type (Hireling.txt Class 561 = act5hire2; 24 rows). Skills now: Might (mode 1, chance 5), Battle Orders (mode 5, 10), Whirlwind (mode 14 = SQ, 85). MonStats act5hire1/2:
+  `Skill1=Whirlwind, Sk1lvl=15, Sk1mode=seq_mercwhirlwind` with a loose MonSeq.txt (stock rows + 24 rows: 8 A1 frames x3, hit events at frames 3 and 7 of each). PD2 uses a separate `MonWhirlwind` skill; not needed.
+- Facts: monster token `0A` has art only for DT/DD/GH/NU/RN/WL/A1/A2; no monster has SQ art (spin is built from A1 frames via MonSeq). A merc's pSkills list only holds her MonStats skills.
+- Three problems, three DLL fixes (all in `patch_merc_special`, hirelings only, everything else keeps the game's behaviour):
+  1. The skill-start function (srvstfunc 38 = 6fce20b0) cancels when D2Common #11023 InRange says the target is in melee reach -> a hireling only picks it next to an enemy, so every spin lasted 0 ms.
+     Fix: skip the cancel (`85 C0 74 1C 57` site, `sig_find_merc_special`). The stub calls `qt_is_hireling`, which also runs `ww_extend_destination`.
+  2. The destination was the adjacent enemy, so he spun on the spot. The path record (unit+0x2c) holds the destination at +0x10/+0x14/+0x18 as (y<<16)|x in sub-tile units (5 per tile),
+     the enemy link at +0x58 (the game re-aims the destination at it every tick, so it is cleared). `ww_extend_destination` puts the destination past the enemy: distance + 7 units,
+     clamped 10..15 (about 2-3 tiles), at a random angle of -40..+40 degrees -> carves and zig-zags without running far off.
+  3. Path collision mask: players get 0x1c09, monsters 0x3c01 (blocked by other units). Fix: `add eax,0x3c01` at +c21bd (`sig_find_merc_mask`) gives hirelings 0x1c09 so the spin passes through monsters.
+- Unresolved: the client shows the spin for only ~0.1 s even though the server holds mode 14 for 1-5 s (client animation of mode 14 for a monster with no SQ art).
+- Balance: free of mana, 85% chance, ~6 hits/s per sequence; user plans a damage analysis across all mercs at the end.
+- Tools used to find this (no longer in the DLL): SetMode call-site and call-chain logging, path-record dumps. The mercdebug build (section 12 tools) is still available.
 
 ## 13. Housekeeping reminders (user side)
 Rename the repo folder to match if not done; replace old `autopilot`/`qolfixes` files in game folders; update `PlugY.ini` `DllToLoad` to `qol.dll`; the LoD game's `qol.ini` currently has `[mercenary] run=1 equip=1` (+ `drop_items`).

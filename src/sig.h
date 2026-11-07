@@ -150,4 +150,28 @@ __attribute__((unused)) static int sig_find_merc_slot(const unsigned char *buf, 
     o->site = h; o->chk_call = h + 16; o->use2 = h + 25; o->use1 = h + 40;
     return 1;
 }
+
+// D2Game skill-start function shared by Whirlwind-type skills (srvstfunc 38): if the caster's target is already within melee reach (`#11023 InRange`, result in eax)
+// the skill is cancelled and the caster goes back to neutral (it then attacks normally). The site is `test eax,eax ; je continue ; push edi` (85 C0 74 1C 57), which
+// we replace with a jump. Returns the offset of the `test eax,eax` if the pattern occurs exactly once (patched = 1 if it is already our `jmp`), else -1.
+__attribute__((unused)) static long sig_find_merc_special(const unsigned char *buf, size_t n, int *patched) {
+    static const short orig[]   = {0x6A,0x00,0x53,0x56,0xE8,-1,-1,-1,-1, 0x85,0xC0,0x74,0x1C,0x57, 0xE8,-1,-1,-1,-1, 0x53,0x8B,0x5C,0x24,0x14,0x8B,0xC6,0xE8,-1,-1,-1,-1, 0x5B,0x5F,0x5E,0x5D,0x83,0xC4,0x38,0xC2,0x08,0x00};
+    static const short jumped[] = {0x6A,0x00,0x53,0x56,0xE8,-1,-1,-1,-1, 0xE9,-1,-1,-1,-1, 0xE8,-1,-1,-1,-1, 0x53,0x8B,0x5C,0x24,0x14,0x8B,0xC6,0xE8,-1,-1,-1,-1, 0x5B,0x5F,0x5E,0x5D,0x83,0xC4,0x38,0xC2,0x08,0x00};
+    int c1 = 0, c2 = 0;
+    long a = qt_find(buf, n, 0, n, orig, (int)(sizeof orig / sizeof *orig), &c1), b = qt_find(buf, n, 0, n, jumped, (int)(sizeof jumped / sizeof *jumped), &c2);
+    if (c1 + c2 != 1) return -1;
+    if (patched) *patched = c2 == 1;
+    return (c1 ? a : b) + 9;
+}
+// The collision mask the Whirlwind-style skill start gives the mover's path: players get 0x1c09, everything else 0x3c01 (which also blocks on other units). Returns the offset of the
+// `add eax,0x3c01` (5 bytes) or its already-patched jmp form; -1 unless exactly one match.
+__attribute__((unused)) static long sig_find_merc_mask(const unsigned char *buf, size_t n, int *patched) {
+    static const short orig[]   = {0x8B,0xC7,0xF7,0xD8,0x1B,0xC0,0x25,0x08,0xE0,0xFF,0xFF,0x68,0x01,0x0C,0x00,0x00, 0x05,0x01,0x3C,0x00,0x00, 0x53};
+    static const short jumped[] = {0x8B,0xC7,0xF7,0xD8,0x1B,0xC0,0x25,0x08,0xE0,0xFF,0xFF,0x68,0x01,0x0C,0x00,0x00, 0xE9,-1,-1,-1,-1, 0x53};
+    int c1 = 0, c2 = 0;
+    long a = qt_find(buf, n, 0, n, orig, (int)(sizeof orig / sizeof *orig), &c1), b = qt_find(buf, n, 0, n, jumped, (int)(sizeof jumped / sizeof *jumped), &c2);
+    if (c1 + c2 != 1) return -1;
+    if (patched) *patched = c2 == 1;
+    return (c1 ? a : b) + 16;
+}
 #endif

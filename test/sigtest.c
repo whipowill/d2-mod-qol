@@ -24,6 +24,20 @@ int main(int argc, char **argv) {
         ok = ok && sig_find_keep_equip(big, sizeof big, &patched, &ep) == -1;
         printf("keep %s\n", ok ? "ok" : "FAIL"); return !ok;
     }
+    if (!strncmp(argv[1], "special", 7)) {      // special-orig / special-patched / special-none : sig_find_merc_special on a buffer
+        unsigned char big[256] = {0}; size_t n = strlen(argv[2]) / 2 < sizeof big ? strlen(argv[2]) / 2 : sizeof big;
+        for (size_t i = 0; i < n; i++) { unsigned v; sscanf(argv[2] + 2 * i, "%2x", &v); big[i] = (unsigned char)v; }
+        int patched = -1; long at = sig_find_merc_special(big, n, &patched);
+        int ok = !strcmp(argv[1], "special-orig") ? (at == 9 && !patched) : !strcmp(argv[1], "special-patched") ? (at == 9 && patched == 1) : at < 0;
+        printf("%s %s (offset %ld)\n", argv[1], ok ? "ok" : "FAIL", at); return !ok;
+    }
+    if (!strncmp(argv[1], "mask", 4)) {         // mask-orig / mask-patched / mask-none : sig_find_merc_mask on a buffer
+        unsigned char big[256] = {0}; size_t n = strlen(argv[2]) / 2 < sizeof big ? strlen(argv[2]) / 2 : sizeof big;
+        for (size_t i = 0; i < n; i++) { unsigned v; sscanf(argv[2] + 2 * i, "%2x", &v); big[i] = (unsigned char)v; }
+        int patched = -1; long at = sig_find_merc_mask(big, n, &patched);
+        int ok = !strcmp(argv[1], "mask-orig") ? (at == 16 && !patched) : !strcmp(argv[1], "mask-patched") ? (at == 16 && patched == 1) : at < 0;
+        printf("%s %s (offset %ld)\n", argv[1], ok ? "ok" : "FAIL", at); return !ok;
+    }
     if (!strncmp(argv[1], "xp", 2)) {          // xp-orig / xp-patched / xp-none : sig_find_xp_penalty on a buffer
         unsigned char big[256] = {0}; size_t n = strlen(argv[2]) / 2 < sizeof big ? strlen(argv[2]) / 2 : sizeof big;
         for (size_t i = 0; i < n; i++) { unsigned v; sscanf(argv[2] + 2 * i, "%2x", &v); big[i] = (unsigned char)v; }

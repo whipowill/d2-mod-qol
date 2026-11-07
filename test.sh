@@ -26,5 +26,15 @@ XPP=05b90a0000008b048d9ca3d16f3d00010000eb0ab900010000e9aa95f7ff8bc2c3cccccccc  
 .out/sigtest xp-patched $XPP
 .out/sigtest xp-none $RECV
 .out/sigtest xp-none ${XPO}${XPO}                                                  # two matches = ambiguous = refuse
+SPO=6a005356e83f87f4ff85c0741c57e8c11c0000538b5c24148bc6e8f550f5ff5b5f5e5d83c438c20800        # the Whirlwind-style skill start (stock D2Game 1.13d bytes around the melee-range check)
+.out/sigtest special-orig $SPO
+.out/sigtest special-patched ${SPO/85c0741c57/e9aabbccdd}
+.out/sigtest special-none $RECV
+.out/sigtest special-none ${SPO}${SPO}                                              # two matches = ambiguous = refuse
+MKO=8bc7f7d81bc02508e0ffff68010c000005013c00005389445c   # the path collision-mask choice in the same skill start (stock bytes)
+.out/sigtest mask-orig $MKO
+.out/sigtest mask-patched ${MKO/05013c0000/e9aabbccdd}
+.out/sigtest mask-none $RECV
+.out/sigtest mask-none ${MKO}${MKO}
 gcc -O1 -Wall -Wextra -Isrc -o .out/replay test/replay.c src/core.c
 [ -n "${1:-}" ] && .out/replay "$1" 4 1 | grep -E "WOULD|PICKUP|end:|equipped"

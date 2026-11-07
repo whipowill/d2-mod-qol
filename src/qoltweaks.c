@@ -7,6 +7,7 @@
 //   - receive hook: IAT hook of D2Client's D2Net#10008 (server->client packets)     -> sees items/belt/position
 // Config: qol.ini next to the game exe (created with defaults on first run).
 #include <windows.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include "core.h"
@@ -14,6 +15,7 @@
 #include "merc.h"
 
 static FILE *g_log;
+static int g_merc_special = 0;                                   // ini: [mercenary] whirlwind
 static int g_summons = 0;                                        // ini: [summons] enabled
 static int g_merc_drop = 0;                                      // ini: [mercenary] drop_items
 static int g_merc_equip = 0;                                    // ini: [mercenary] equip
@@ -184,13 +186,18 @@ static int g_arg = -1;           // 2nd argument the game itself uses for gamepl
 
 static int dm_begin(const void *pkt, int size, int arg, int send_arg_known);
 static void dm_step(DWORD now);
+static volatile int g_sum_busy;                    // 1 while the recast is running
 static void sum_on_send(const unsigned char *b, int size);
 static void sum_on_recv(const uint8_t *b, int len);
 static void sum_step(DWORD now);
 static volatile int g_dm_active_flag;               // mirrors g_dm.active for the hooks above its definition
 static int g_last_send_r = 1;                        // result of the game's most recent real send
 static int __stdcall h_send(int size, int arg, void *pkt) {
-    if (g_summons && !g_injecting && size > 0 && size <= 16 && readable(pkt, size)) sum_on_send(pkt, size);
+    if (g_summons && !g_injecting && size > 0 && size <= 16 && readable(pkt, size)) {
+        sum_on_send(pkt, size);
+        const unsigned char *b = pkt;
+        if (g_sum_busy && b[0] >= 0x01 && b[0] <= 0x10) return g_last_send_r;                  // while the summons are being recast, hold the player's own walk / run / attack / cast requests (they would cancel the casts)
+    }
     if (g_merc_drop && !g_injecting && size == 9 && readable(pkt, 9) && ((const unsigned char *)pkt)[0] == 0x36 && !g_dm_active_flag
         && dm_begin(pkt, size, arg, g_arg >= 0)) return g_last_send_r;      // the hire request is held back until the merc's gear is dropped
     int r = o_send(size, arg, pkt);
@@ -333,6 +340,7 @@ static void load_config(ap_config *c) {
     g_merc_equip = master && GetPrivateProfileIntA("mercenary", "equip", 0, path);
     g_merc_drop = master && GetPrivateProfileIntA("mercenary", "drop_items", 0, path);
     g_summons = master && GetPrivateProfileIntA("summons", "enabled", 0, path);
+    g_merc_special = master && GetPrivateProfileIntA("mercenary", "whirlwind", 0, path);
     g_xp_nopenalty = master && GetPrivateProfileIntA("experience", "no_level_penalty", 0, path);
     g_keep_equip = master && GetPrivateProfileIntA("death", "keep_equipment", 0, path);
     c->enabled = master && GetPrivateProfileIntA("pickup", "enabled", 1, path);
@@ -859,14 +867,14 @@ static DWORD WINAPI summon_thread(LPVOID arg) {
 // -- client side: bring them back --
 static struct {
     int state;                                                                // 0 idle, 1 waiting for the game to be ready, 2 casting
-    DWORD start, next, run_start, cast_t, idle_t; int ent_id[24], ent_k[24], ent_target[24], ent_tries[24], ent_fail[24], ne, ei, phase, restore_skill, last_sel, saw_cast, before;
+    DWORD start, next, run_start, cast_t; int moved; int ent_id[24], ent_k[24], ent_target[24], ent_tries[24], ent_fail[24], ne, ei, phase, restore_skill, last_sel, saw_cast, before;
 } g_rs;
 static void sum_send(const uint8_t *pk, int len) { g_injecting = 1; o_send(len, g_arg, (void *)pk); g_injecting = 0; }
 static void sum_select(int skill) { uint8_t pk[9] = {0x3c, (uint8_t)skill, (uint8_t)(skill >> 8), 0, 0, 0xff, 0xff, 0xff, 0xff}; sum_send(pk, 9); }
 static void sum_finish(const char *why, DWORD now) {
     g_refill = 2;                                                             // the next request the server processes puts the mana back
     sum_select(g_rs.restore_skill ? g_rs.restore_skill : (g_rs.ne > 0 ? g_rs.ent_id[g_rs.ne - 1] : 0));    // also puts the selected skill back, and makes sure a request arrives
-    g_rs.state = 0; g_scan_enable_at = now + 4000;                             // pets need a moment to appear before we start counting again
+    g_rs.state = 0; g_sum_busy = 0; g_scan_enable_at = now + 4000;                             // pets need a moment to appear before we start counting again
     logf_("summons: %s", why);
 }
 static void sum_on_send(const unsigned char *b, int size) {                   // remember which skill the game has selected, to put it back afterwards
@@ -895,41 +903,146 @@ static void sum_step(DWORD now) {
             g_rs.ent_target[e] = g_saved_cnt[i];                                     // aim for the old count; a cast that makes several pets (ravens) gets there in one go, one-per-cast pets (wolves, vines in a mod that allows several) take more
         }
         if (!g_rs.ne) { g_rs.state = 0; g_scan_on = 1; return; }
-        g_refill = 1;
+        g_refill = 1; g_sum_busy = 1;
         g_rs.restore_skill = g_cur_skill[0]; g_rs.last_sel = 0; g_rs.ei = 0; g_rs.phase = 0; g_rs.next = now; g_rs.run_start = now; g_rs.state = 2;
         logf_("summons: bringing back %d kind(s); mana is topped up before each cast and left full afterwards", g_rs.ne);
         return;
     }
-    if (now - g_rs.run_start > 30000) { sum_finish("took too long; stopped", now); return; }
+    if (now - g_rs.run_start > 40000) { sum_finish("took too long; stopped", now); return; }
     if ((int)(now - g_rs.next) < 0) return;
     if (g_rs.ei >= g_rs.ne) { sum_finish("done", now); return; }
     if (!ap_player_pos(&x, &y)) return;
     int e = g_rs.ei, k = g_rs.ent_k[e], alive[24];
-    if (g_rs.phase == 0) {                                                   // select (if needed) and cast, back to back
+    DWORD pl = g_srv_player; int mode = -1;                                  // her animation mode: 1 / 5 = standing (town), 2 / 3 / 6 = walking or running, anything else = busy (casting, hit...)
+    if (pl && readable((const void *)pl, 0x20)) mode = (int)*(DWORD *)(pl + 0x10);
+    int moving = mode == 2 || mode == 3 || mode == 6, busy = mode >= 0 && !moving && mode != 1 && mode != 5;
+    if (g_rs.phase == 0) {                                                   // cast: whatever she is doing, except in the middle of another animation
+        if (busy) { g_rs.next = now + 30; return; }
         sum_count_alive(g_srv_game, alive, 0); g_rs.before = alive[k];
         if (alive[k] >= g_rs.ent_target[e]) { g_rs.ei++; return; }           // already enough of this one
         int sk = g_rs.ent_id[e];
         if (sk != g_rs.last_sel) { sum_select(sk); g_rs.last_sel = sk; }
         uint8_t pk[5] = {0x0c, (uint8_t)x, (uint8_t)(x >> 8), (uint8_t)y, (uint8_t)(y >> 8)}; sum_send(pk, 5);
-        g_rs.ent_tries[e]++;
-        g_rs.phase = 1; g_rs.cast_t = now; g_rs.saw_cast = 0; g_rs.next = now + 40;
-    } else if (g_rs.phase == 1) {                                            // wait for her cast animation to start and finish (animation mode back to neutral / town neutral)
-        DWORD pl = g_srv_player; int mode = -1;
-        if (pl && readable((const void *)pl, 0x20)) mode = (int)*(DWORD *)(pl + 0x10);
-        int idle = mode == 1 || mode == 5;
-        if (mode >= 0 && !idle) g_rs.saw_cast = 1;
-        if ((g_rs.saw_cast && idle) || now - g_rs.cast_t > 1500 || (!g_rs.saw_cast && now - g_rs.cast_t > 500)) { sum_select(g_rs.ent_id[e]); g_rs.phase = 2; g_rs.idle_t = now; g_rs.next = now; }      // the extra select makes the server run its mana top-up right after the cast
-        else g_rs.next = now + 20;
-    } else {                                                                 // did the pet count go up? give it a moment to show up, retry the cast if not
+        g_rs.ent_tries[e]++; g_rs.moved = moving;
+        logf_("summons: cast skill %d (try %d, %d of %d wanted, mode %d)", sk, g_rs.ent_tries[e], alive[k], g_rs.ent_target[e], mode);
+        g_rs.phase = 1; g_rs.cast_t = now; g_rs.next = now + 40;
+    } else {                                                                 // did the pet count go up? if not within about a second, cast again
         sum_count_alive(g_srv_game, alive, 0);
-        if (alive[k] > g_rs.before || now - g_rs.idle_t > 600) {
-            g_rs.ent_fail[e] = alive[k] > g_rs.before ? 0 : g_rs.ent_fail[e] + 1;                              // a cast that adds nothing: ignored once (retry), or the limit is reached (stop)
-            if (alive[k] >= g_rs.ent_target[e] || g_rs.ent_tries[e] >= g_rs.ent_target[e] + 2 || g_rs.ent_fail[e] >= 2) g_rs.ei++;
+        if (alive[k] > g_rs.before) {                                        // got one (or several): the extra select makes the server run its mana top-up right after the cast
+            sum_select(g_rs.ent_id[e]); g_rs.ent_fail[e] = 0;
+            if (alive[k] >= g_rs.ent_target[e]) g_rs.ei++;
             g_rs.phase = 0; g_rs.next = now + 20;
-        } else g_rs.next = now + 40;
+        } else if (now - g_rs.cast_t > 1000) {                               // nothing appeared: ignored, interrupted by her running, or the limit is reached
+            if (!g_rs.moved) g_rs.ent_fail[e]++;                             // only casts from a standstill count against the pet
+            if (g_rs.ent_fail[e] >= 3 || g_rs.ent_tries[e] >= g_rs.ent_target[e] + 8) g_rs.ei++;
+            g_rs.phase = 0; g_rs.next = now + 20;
+        } else g_rs.next = now + 30;
     }
 }
 static void sum_on_recv(const uint8_t *b, int len) { (void)b; (void)len; }
+
+
+// ---- hirelings may use Whirlwind-style skills against enemies already in melee reach ---------------------------------------------
+// The skill-start function shared by Whirlwind-type skills (D2Game srvstfunc 38) cancels the skill when the caster's target is already within melee reach (it is meant
+// to close distance) and sends the caster back to neutral to attack normally. A hireling only picks such a skill when an enemy is next to her, so it was cancelled every
+// time (0 ms in the special-attack mode). For hirelings we skip that cancel; every other unit keeps the game's behaviour.
+// A hireling starts the spin next to the enemy, so the path's destination (the target, a couple of units away) would end the spin after a step or two. Push the
+// destination on past the enemy, with a random sideways angle each time, so the spin carries through the pack and zig-zags. Positions are in sub-tile units (5 per tile);
+// path dwords +0x10/+0x14/+0x18 hold the destination as (y << 16) | x. If the new spot is not reachable the game simply falls back to a normal attack.
+static void ww_extend_destination(DWORD unit) {
+    DWORD path = *(DWORD *)(unit + 0x2c);
+    if (!path || !readable((const void *)path, 0x20)) return;
+    int px = (int)(*(DWORD *)path >> 16), py = (int)(*(DWORD *)(path + 4) >> 16);
+    DWORD t = *(DWORD *)(path + 0x10);
+    int tx = (int)(t & 0xFFFF), ty = (int)(t >> 16);
+    double dx = tx - px, dy = ty - py, len = sqrt(dx * dx + dy * dy);
+    static DWORD seed = 12345;
+    seed = seed * 1103515245u + 12345u + GetTickCount();
+    if (len < 1.0) { double a = (double)((seed >> 8) & 1023) * 6.2831853 / 1024.0; dx = cos(a); dy = sin(a); len = 1.0; }
+    double ang = ((double)((seed >> 16) % 81) - 40.0) * 3.14159265 / 180.0;                      // -40 .. +40 degrees
+    double ux = dx / len, uy = dy / len, c = cos(ang), sn = sin(ang);
+    double vx = ux * c - uy * sn, vy = ux * sn + uy * c;
+    double reach = len + 7.0; if (reach < 10.0) reach = 10.0; if (reach > 15.0) reach = 15.0;    // through the enemy and about one tile past it, never far from the fight
+    int nx = px + (int)(vx * reach), ny = py + (int)(vy * reach);
+    if (nx < 1 || ny < 1 || nx > 0xFFFE || ny > 0xFFFE) return;
+    DWORD v = ((DWORD)ny << 16) | (DWORD)nx;
+    *(DWORD *)(path + 0x10) = v; *(DWORD *)(path + 0x14) = v; *(DWORD *)(path + 0x18) = v;
+    if (readable((const void *)path, 0x68)) *(DWORD *)(path + 0x58) = 0;                          // detach the enemy: a player's Whirlwind aims at a ground spot, and the game re-aimed ours at the enemy
+}
+static int __cdecl qt_is_hire_unit(DWORD unit) {                    // plain check, no side effects
+    if (!unit || *(DWORD *)unit != 1) return 0;
+    DWORD c = *(DWORD *)(unit + 4);
+    for (int i = 0; i < g_hire_n; i++) if ((DWORD)g_hire_ids[i] == c) return 1;
+    return 0;
+}
+static int __cdecl qt_is_hireling(DWORD unit) {
+    if (!unit || *(DWORD *)unit != 1) return 0;
+    DWORD c = *(DWORD *)(unit + 4);
+    for (int i = 0; i < g_hire_n; i++) if ((DWORD)g_hire_ids[i] == c) { ww_extend_destination(unit); return 1; }
+    return 0;
+}
+static int patch_merc_special(HMODULE g) {
+    BYTE *base = (BYTE *)g;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+    IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
+    for (int k = 0; k < nt->FileHeader.NumberOfSections; k++, sec++) {
+        if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        BYTE *code = base + sec->VirtualAddress; size_t len = sec->Misc.VirtualSize; int patched = 0;
+        long at = sig_find_merc_special(code, len, &patched);
+        if (at < 0) continue;
+        if (patched) { logf_("merc whirlwind: already patched"); return 1; }
+        BYTE *site = code + at;                                           // 85 C0 (test eax,eax)  74 1C (je continue)  57 (push edi): 5 bytes
+        DWORD cont = (DWORD)(site + 4 + 0x1C), after = (DWORD)(site + 5);     // continue = the normal start; after = the abort path (the instruction after the displaced push edi)
+        BYTE *st = stub_alloc(); if (!st) return 0;
+        BYTE *p = st;
+        static const BYTE a[] = {0x85, 0xC0};                             // test eax,eax        (eax = "target is in melee reach")
+        p = emit(p, a, 2);
+        *p++ = 0x0F; *p++ = 0x84; *(DWORD *)p = cont - (DWORD)(p + 4); p += 4;   // je continue   (not in reach: the game's normal path)
+        static const BYTE b[] = {0x60, 0x56};                             // pushad ; push esi (the caster)
+        p = emit(p, b, 2);
+        p = emit_rel(p, 0xE8, (DWORD)qt_is_hireling);                     // eax = 1 for a hireling
+        static const BYTE c[] = {0x83, 0xC4, 0x04, 0x89, 0x44, 0x24, 0x1C, 0x61, 0x85, 0xC0};   // add esp,4 ; mov [esp+1C],eax ; popad ; test eax,eax
+        p = emit(p, c, sizeof c);
+        *p++ = 0x0F; *p++ = 0x85; *(DWORD *)p = cont - (DWORD)(p + 4); p += 4;   // jne continue  (a hireling: skip the cancel)
+        *p++ = 0x57;                                                      // push edi            (the displaced instruction)
+        emit_rel(p, 0xE9, after);                                         // on to the game's cancel path
+        BYTE jmp[5]; jmp[0] = 0xE9; *(DWORD *)(jmp + 1) = (DWORD)st - (DWORD)(site + 5);
+        patch_bytes(site, jmp, 5);
+        logf_("merc whirlwind: patched D2Game +%lx (hirelings may start special attacks in melee reach)", (unsigned long)(site - base));
+        {   // players' path collision mask for hirelings too, so the spin passes through monsters like a player's Whirlwind
+            int mp = 0; long ma = sig_find_merc_mask(code, len, &mp);
+            if (ma < 0) logf_("merc whirlwind: path collision code not found; hirelings keep the normal collision mask");
+            else if (!mp) {
+                BYTE *ms = code + ma, *back = ms + 5; BYTE *st2 = stub_alloc();
+                if (st2) {
+                    BYTE *q = st2;
+                    static const BYTE m1[] = {0x05, 0x01, 0x3C, 0x00, 0x00, 0x60, 0x56};                  // add eax,3c01 (displaced) ; pushad ; push esi
+                    q = emit(q, m1, sizeof m1);
+                    q = emit_rel(q, 0xE8, (DWORD)qt_is_hire_unit);
+                    static const BYTE m2[] = {0x83, 0xC4, 0x04, 0x85, 0xC0, 0x61, 0x74, 0x05, 0xB8, 0x09, 0x1C, 0x00, 0x00};   // add esp,4 ; test eax,eax ; popad ; je +5 ; mov eax,1c09
+                    q = emit(q, m2, sizeof m2);
+                    emit_rel(q, 0xE9, (DWORD)back);
+                    BYTE j2[5]; j2[0] = 0xE9; *(DWORD *)(j2 + 1) = (DWORD)st2 - (DWORD)back;
+                    patch_bytes(ms, j2, 5);
+                    logf_("merc whirlwind: patched D2Game +%lx (hirelings pass through monsters like a player's Whirlwind)", (unsigned long)(ms - base));
+                }
+            }
+        }
+        return 1;
+    }
+    logf_("merc whirlwind: the skill-start code was not found in D2Game (or appears more than once); not patched");
+    return 0;
+}
+static DWORD WINAPI special_thread(LPVOID arg) {
+    (void)arg;
+    if (!g_merc_special) return 0;
+    for (int i = 0; i < 6000; i++) {
+        HMODULE g = GetModuleHandleA("D2Game.dll");
+        if (g) { patch_merc_special(g); return 0; }
+        Sleep(100);
+    }
+    return 0;
+}
 
 static DWORD WINAPI equip_thread(LPVOID arg) {
     (void)arg;
@@ -974,18 +1087,15 @@ typedef int (__stdcall *setmode_t)(DWORD, int);
 static setmode_t o_setmode;
 static volatile LONG g_merc_conv;                              // walk->run conversions done (logged so the log shows the fix firing)
 static int __stdcall h_setmode(DWORD unit, int mode) {
-    if ((g_merc_drop || g_merc_equip) && unit && readable((const void *)unit, 8) && *(DWORD *)unit == 1) {          // remember the mercenary's unit
-        DWORD c = *(DWORD *)(unit + 4);
-        for (int i = 0; i < g_hire_n; i++) if ((DWORD)g_hire_ids[i] == c) { g_merc_unit = unit; break; }
-    }
-    if (g_merc_run && mode == 2 && unit && *(DWORD *)unit == 1) {                 // monster unit asked to WALK
-        DWORD cls = *(DWORD *)(unit + 4);
-        for (int i = 0; i < g_hire_n; i++) if ((DWORD)g_hire_ids[i] == cls) {
-            mode = 15;
-            LONG n = InterlockedIncrement(&g_merc_conv);
-            if (n == 1) logf_("merc run fix: mercenary (class %u) asked to walk -> run (conversion #%ld)", (unsigned)cls, (long)n);
-            break;
-        }
+    // This runs for EVERY monster mode change (thousands per second in a fight): classify with plain reads only, and do the heavier work for the merc alone.
+    DWORD c = 0; int hire = 0;
+    if (unit && *(DWORD *)unit == 1) { c = *(DWORD *)(unit + 4); for (int i = 0; i < g_hire_n; i++) if ((DWORD)g_hire_ids[i] == c) { hire = 1; break; } }
+    if (!hire) return o_setmode(unit, mode);
+    if (g_merc_drop || g_merc_equip) g_merc_unit = unit;                                                // remember the mercenary's unit
+    if (g_merc_run && mode == 2) {                                                                      // the merc asked to WALK: run instead
+        mode = 15;
+        LONG n = InterlockedIncrement(&g_merc_conv);
+        if (n == 1) logf_("merc run fix: mercenary (class %u) asked to walk -> run (conversion #%ld)", (unsigned)c, (long)n);
     }
     return o_setmode(unit, mode);
 }
@@ -1175,6 +1285,7 @@ static DWORD WINAPI worker(LPVOID arg) {
     CreateThread(NULL, 0, merc_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, equip_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, summon_thread, NULL, 0, NULL);
+    CreateThread(NULL, 0, special_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, patch_thread, NULL, 0, NULL);
     QueryPerformanceFrequency(&g_freq);
     logf_("qoltweaks loaded: enabled=%d range=%d rejuv_always=%d", cfg.enabled, cfg.range, cfg.rejuv_always);
