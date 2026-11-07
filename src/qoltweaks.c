@@ -14,6 +14,7 @@
 #include "merc.h"
 
 static FILE *g_log;
+static int g_summons = 0;                                        // ini: [summons] enabled
 static int g_merc_drop = 0;                                      // ini: [mercenary] drop_items
 static int g_merc_equip = 0;                                    // ini: [mercenary] equip
 #define D2GAME_TIMESTAMP_113D 1318970639u    // D2Game.dll of stock LoD 1.13d (Oct 2011)
@@ -132,13 +133,22 @@ static int parse_monstats_cb(const char *txt, int len) {
 }
 static int parse_misc_cb(const char *txt, int len) { return ap_parse_misc(txt, len); }
 static int parse_itemtypes_cb(const char *txt, int len) { return merc_parse_itemtypes(txt, len); }
+static ap_summon_t g_sum[24]; static volatile int g_sum_n;     // the druid's summon skills (Skills.txt)
+static int parse_petmon_cb(const char *txt, int len);
+static int parse_skills_cb(const char *txt, int len) {
+    ap_summon_t tmp[24]; int n = ap_parse_skills(txt, len, tmp, 24);
+    for (int i = 0; i < n; i++) g_sum[i] = tmp[i];
+    g_sum_n = n;
+    return n;
+}
 
 // Called from the game thread (Storm's file functions are the game's own, so use them where the game does).
 // Retries for a while in case the archives aren't all mounted yet; gives up quietly after that.
 static void misc_tick(void) {
-    static int tries, done_misc, done_mon, done_it; static DWORD next;
+    static int tries, done_misc, done_mon, done_it, done_sk, done_pm; static DWORD next;
     if (!g_merc_equip) done_it = 1;
-    if ((done_misc && done_mon && done_it) || tries >= 30) return;
+    if (!g_summons) done_sk = done_pm = 1;
+    if ((done_misc && done_mon && done_it && done_sk && done_pm) || tries >= 30) return;
     DWORD now = GetTickCount();
     if ((int)(now - next) < 0) return;
     next = now + 3000; tries++;
@@ -153,6 +163,16 @@ static void misc_tick(void) {
         if (n >= 0 || n == -2) done_mon = 1;
         if (n > 0) logf_("MonStats.txt: %d mercenary classes (attempt %d)", n, tries);
     }
+    if (!done_sk) {
+        int n = storm_read("Data\\global\\excel\\Skills.txt", parse_skills_cb);
+        if (n >= 0 || n == -2) done_sk = 1;
+        if (n > 0) logf_("Skills.txt: %d druid summon skills (attempt %d)", n, tries);
+    }
+    if (done_sk && !done_pm && g_sum_n > 0) {
+        int n = storm_read("Data\\global\\excel\\MonStats.txt", parse_petmon_cb);
+        if (n >= 0 || n == -2) done_pm = 1;
+        if (n > 0) logf_("MonStats.txt: %d summon pet classes (attempt %d)", n, tries);
+    }
     if (!done_it) {
         int n = storm_read("Data\\global\\excel\\ItemTypes.txt", parse_itemtypes_cb);
         if (n >= 0 || n == -2) done_it = 1;
@@ -164,9 +184,13 @@ static int g_arg = -1;           // 2nd argument the game itself uses for gamepl
 
 static int dm_begin(const void *pkt, int size, int arg, int send_arg_known);
 static void dm_step(DWORD now);
+static void sum_on_send(const unsigned char *b, int size);
+static void sum_on_recv(const uint8_t *b, int len);
+static void sum_step(DWORD now);
 static volatile int g_dm_active_flag;               // mirrors g_dm.active for the hooks above its definition
 static int g_last_send_r = 1;                        // result of the game's most recent real send
 static int __stdcall h_send(int size, int arg, void *pkt) {
+    if (g_summons && !g_injecting && size > 0 && size <= 16 && readable(pkt, size)) sum_on_send(pkt, size);
     if (g_merc_drop && !g_injecting && size == 9 && readable(pkt, 9) && ((const unsigned char *)pkt)[0] == 0x36 && !g_dm_active_flag
         && dm_begin(pkt, size, arg, g_arg >= 0)) return g_last_send_r;      // the hire request is held back until the merc's gear is dropped
     int r = o_send(size, arg, pkt);
@@ -188,8 +212,10 @@ static int __stdcall h_recv(void *buf, int cap) {
     LARGE_INTEGER t0 = {0}; if (g_logging) QueryPerformanceCounter(&t0);
     if (r > 0) {                                         // buffer was just filled by the game: no VirtualQuery needed
         ap_on_recv(buf, r);
+        if (g_summons) sum_on_recv((const uint8_t *)buf, r);
     }
     misc_tick();
+    if (g_summons) sum_step(GetTickCount());
     if (g_dm_active_flag) dm_step(GetTickCount());
     uint8_t out[16];
     int n = g_dm_active_flag ? 0 : ap_tick(GetTickCount(), out);
@@ -306,6 +332,7 @@ static void load_config(ap_config *c) {
     g_merc_run = master && GetPrivateProfileIntA("mercenary", "run", 0, path);
     g_merc_equip = master && GetPrivateProfileIntA("mercenary", "equip", 0, path);
     g_merc_drop = master && GetPrivateProfileIntA("mercenary", "drop_items", 0, path);
+    g_summons = master && GetPrivateProfileIntA("summons", "enabled", 0, path);
     g_xp_nopenalty = master && GetPrivateProfileIntA("experience", "no_level_penalty", 0, path);
     g_keep_equip = master && GetPrivateProfileIntA("death", "keep_equipment", 0, path);
     c->enabled = master && GetPrivateProfileIntA("pickup", "enabled", 1, path);
@@ -524,8 +551,6 @@ static int patch_merc_module(HMODULE mod, int server) {
 #define D2COMMON_TIMESTAMP_113D 1318970339u
 static int __stdcall qt_merc_class_ok(int type_id, int merc_class, int item_class) {
     int ok = merc_class_ok(type_id, merc_class, item_class);
-    static int logged;                                     // only reached when the merc already meets the item's strength / dexterity / level
-    if (g_logging && logged < 30) { logged++; logf_("merc class test: merc class %d, item type %d, item class %d -> %s", merc_class, type_id, item_class, ok ? "allowed" : "refused"); }
     return ok;
 }
 
@@ -642,9 +667,8 @@ static void dm_step(DWORD now) {
     if (g_dm.phase == 0) { pk[0] = 0x61; pk[1] = (uint8_t)g_dm.job[g_dm.idx].loc; pk[2] = 0; len = 3; g_dm.phase_ms = now; }
     else { pk[0] = 0x17; memcpy(pk + 1, &cur, 4); len = 5; g_dm.phase_ms = now; }
     g_injecting = 1;
-    int sr = o_send(len, g_arg, pk);
+    o_send(len, g_arg, pk);
     g_injecting = 0;
-    logf_("merc drop: sent %s for slot %u item %08x (result %d)", g_dm.phase == 0 ? "take-off" : "drop", (unsigned)g_dm.job[g_dm.idx].loc, (unsigned)(g_dm.phase == 0 ? g_dm.job[g_dm.idx].guid : cur), sr);
     if (g_dm.phase == 1) g_dm.idx++;
     g_dm.phase ^= 1;
     g_dm.next_ms = now + 30;                              // the real pacing is the waits for the cursor item above
@@ -689,6 +713,223 @@ static int patch_merc_slot(HMODULE mod) {
     return 0;
 }
 
+
+
+// ---- druid summons: remember what is alive, bring it back (free) when a game starts ------------------------------------------
+// Every ~2 s (on the server's thread, driven by the packet dispatcher) the mod counts the live pets in the game's monster table (the pet classes come from
+// Skills.txt `summon` + MonStats.txt) and keeps that list per character in qol_summons.txt, so the file always says what you had when you left. When a Druid
+// enters a game it waits until her position is known, then replays the normal select + cast requests (spaced for the cast animation) with mana topped up before each
+// request (the server tick sets stat 8 to stat 9), and finally leaves the mana full and re-selects the skill. Nothing is scanned or saved until the restore has finished, so it can't overwrite itself.
+#define SUM_FILE "qol_summons.txt"
+static char g_char[20]; static volatile int g_char_class = -1;               // read from the player unit on the server
+static int g_saved_id[24], g_saved_cnt[24], g_saved_n;                        // what this character had (skill id, live pets)
+static int g_sum_mon[24]; static volatile int g_sum_mon_ready;                 // MonStats class id of each summon's pet (-1 unknown)
+static volatile int g_join_seq; static int g_join_seen;                       // bumped by the server tick whenever a new game/player appears
+static volatile DWORD g_srv_player, g_srv_game;                               // the player unit and game (server memory), for the pet count and her animation mode
+                                         // the player unit (server memory), for reading her animation mode
+static volatile int g_refill;                                                 // 0 off, 1 refill mana before each request, 2 final top-up (set by the client side)
+static volatile int g_scan_on; static DWORD g_scan_enable_at;                 // snapshots may only overwrite the file once the restore is over
+static int g_cur_skill[2];                                                    // the skill the game last selected: [0] right hand, [1] left hand
+static int sum_index(int id) { for (int i = 0; i < g_sum_n; i++) if (g_sum[i].id == id) return i; return -1; }
+
+static int parse_petmon_cb(const char *txt, int len) {
+    char names[24][24];
+    for (int i = 0; i < g_sum_n; i++) snprintf(names[i], sizeof names[i], "%s", g_sum[i].mon);
+    int n = ap_monster_ids(txt, len, (const char (*)[24])names, g_sum_n, g_sum_mon);
+    if (n > 0) g_sum_mon_ready = 1;
+    return n;
+}
+static void sum_file_load(void) {
+    g_saved_n = 0;
+    FILE *f = fopen(SUM_FILE, "r"); if (!f) return;
+    char line[256], key[24]; snprintf(key, sizeof key, "%s=", g_char);
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, key, strlen(key))) continue;
+        for (char *p = line + strlen(key); *p && g_saved_n < 24;) {
+            int id = atoi(p), cnt = 1; while (*p && *p != ':' && *p != ',') p++;
+            if (*p == ':') { p++; cnt = atoi(p); while (*p && *p != ',') p++; }
+            if (*p == ',') p++;
+            if (id > 0 && cnt > 0) { g_saved_id[g_saved_n] = id; g_saved_cnt[g_saved_n++] = cnt; }
+        }
+        break;
+    }
+    fclose(f);
+}
+static void sum_file_save(void) {
+    char keep[8][256]; int nk = 0; char line[256]; size_t kl = strlen(g_char);
+    FILE *f = fopen(SUM_FILE, "r");
+    if (f) { while (nk < 8 && fgets(line, sizeof line, f)) if (strncmp(line, g_char, kl) || line[kl] != '=') snprintf(keep[nk++], 256, "%s", line); fclose(f); }
+    f = fopen(SUM_FILE, "w"); if (!f) return;
+    for (int i = 0; i < nk; i++) fputs(keep[i], f);
+    fprintf(f, "%s=", g_char);
+    for (int i = 0; i < g_saved_n; i++) fprintf(f, "%s%d:%d", i ? "," : "", g_saved_id[i], g_saved_cnt[i]);
+    fputs("\n", f); fclose(f);
+}
+
+// -- server side: the packet dispatcher hook gives (game, player) on the server's thread --
+static void sum_count_alive(DWORD game, int *alive, int on_server_thread) {                         // live pets per summon skill, from the game's monster table (128 chains at game+0x1320, next unit at +0xe4)
+    for (int k = 0; k < 24; k++) alive[k] = 0;
+    if (!readable((const void *)(game + 0x1320), 0x200)) return;
+    for (int bkt = 0; bkt < 128; bkt++) {
+        DWORD u = *(DWORD *)(game + 0x1320 + 4 * bkt);
+        for (int hops = 0; u && hops < 3000; hops++, u = *(DWORD *)(u + 0xe4)) {
+            if (!on_server_thread && !readable((const void *)u, 0xf0)) break;     // the game's own thread owns these chains, so it can walk them without the memory checks
+            if (*(DWORD *)u != 1) continue;
+            int cls = (int)*(DWORD *)(u + 4); DWORD mode = *(DWORD *)(u + 0x10);
+            if (mode == 0 || mode == 12) continue;                           // dying / dead
+            for (int k = 0; k < g_sum_n; k++) if (g_sum_mon[k] == cls && cls >= 0) alive[k]++;
+        }
+    }
+}
+static void __cdecl qt_srv_tick(DWORD game, DWORD player) {
+    static DWORD last_player, next;
+    if (player != last_player) {                                              // a new game: note who is playing
+        if (!readable((const void *)player, 0x20) || *(DWORD *)player != 0) return;
+        last_player = player; g_srv_player = player; g_srv_game = game;
+        DWORD pd = *(DWORD *)(player + 0x14);
+        memset(g_char, 0, sizeof g_char);
+        if (pd && readable((const void *)pd, 16)) memcpy(g_char, (const void *)pd, 15);
+        g_char_class = (int)*(DWORD *)(player + 4);
+        g_scan_on = 0; g_scan_enable_at = 0; g_join_seq++;
+        logf_("summons: character %s (class %d)", g_char, g_char_class);
+        return;
+    }
+    if (g_refill && g_char_class == 5) {                                      // during the recast: full mana before each request, and a full globe at the end
+        static FARPROC get_stat, set_stat; static int have;
+        if (!get_stat) { HMODULE c = GetModuleHandleA("D2Common.dll"); if (c) { get_stat = GetProcAddress(c, (LPCSTR)(UINT_PTR)10550); set_stat = GetProcAddress(c, (LPCSTR)(UINT_PTR)10590); } }   // GetUnitStat / SetUnitStat
+        if (get_stat && set_stat) {
+            if (g_refill == 1) {
+                have = 1;
+                ((void (__stdcall *)(DWORD, DWORD, int, DWORD))set_stat)(player, 8, ((int (__stdcall *)(DWORD, DWORD, DWORD))get_stat)(player, 9, 0), 0);      // stat 8 = mana, 9 = max mana
+            } else {
+                if (have) {                                                  // finish with a full globe (the casts were free, so nothing is lost)
+                    int maxm = ((int (__stdcall *)(DWORD, DWORD, DWORD))get_stat)(player, 9, 0);
+                    ((void (__stdcall *)(DWORD, DWORD, int, DWORD))set_stat)(player, 8, maxm, 0);
+                }
+                have = 0; g_refill = 0;
+            }
+        } else g_refill = 0;
+    }
+    DWORD now = GetTickCount();
+    if (!g_scan_on || (int)(now - next) < 0 || g_sum_n == 0 || !g_sum_mon_ready || g_char_class != 5 || !g_char[0]) return;
+    next = now + 2000;
+    if (!readable((const void *)(game + 0x1320), 0x200)) return;
+    int alive[24]; sum_count_alive(game, alive, 1);
+    int ids[24], cnt[24], n = 0;
+    for (int k = 0; k < g_sum_n && n < 24; k++) if (alive[k] > 0) { ids[n] = g_sum[k].id; cnt[n++] = alive[k]; }
+    int same = n == g_saved_n; for (int i = 0; same && i < n; i++) if (ids[i] != g_saved_id[i] || cnt[i] != g_saved_cnt[i]) same = 0;
+    if (same) return;
+    for (int i = 0; i < n; i++) { g_saved_id[i] = ids[i]; g_saved_cnt[i] = cnt[i]; }
+    g_saved_n = n;
+    sum_file_save();
+}
+static int patch_summon_hook(HMODULE g) {
+    BYTE *site = (BYTE *)g + 0x674ae;
+    static const BYTE call_site[3] = {0xFF, 0x14, 0xFD};
+    DWORD table = (DWORD)g + 0xfa698;
+    if (!readable(site, 7) || memcmp(site, call_site, 3) || *(DWORD *)(site + 3) != table) { logf_("summons: the packet dispatcher is not as expected; not installed"); return 0; }
+    BYTE *st = stub_alloc();
+    if (!st) return 0;
+    BYTE *p = st;
+    *p++ = 0x60; *p++ = 0x52; *p++ = 0x51;                                    // pushad; push edx (player); push ecx (game)
+    p = emit_rel(p, 0xE8, (DWORD)qt_srv_tick);
+    *p++ = 0x83; *p++ = 0xC4; *p++ = 0x08; *p++ = 0x61;                       // add esp,8; popad
+    *p++ = 0xFF; *p++ = 0x24; *p++ = 0xFD; *(DWORD *)p = table; p += 4;       // jmp [edi*8 + table]  (the handler the game was about to call)
+    BYTE patch[7]; patch[0] = 0xE8; *(DWORD *)(patch + 1) = (DWORD)st - (DWORD)(site + 5); patch[5] = patch[6] = 0x90;
+    patch_bytes(site, patch, 7);
+    logf_("summons: watching the live pets (installed in D2Game)");
+    return 1;
+}
+static DWORD WINAPI summon_thread(LPVOID arg) {
+    (void)arg;
+    if (!g_summons) return 0;
+    for (int i = 0; i < 6000; i++) {
+        HMODULE g = GetModuleHandleA("D2Game.dll");
+        if (g) {
+            IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)g + ((IMAGE_DOS_HEADER *)g)->e_lfanew);
+            if (nt->FileHeader.TimeDateStamp != D2GAME_TIMESTAMP_113D) logf_("summons: this D2Game build is not supported; not installed");
+            else patch_summon_hook(g);
+            return 0;
+        }
+        Sleep(100);
+    }
+    return 0;
+}
+
+// -- client side: bring them back --
+static struct {
+    int state;                                                                // 0 idle, 1 waiting for the game to be ready, 2 casting
+    DWORD start, next, run_start, cast_t, idle_t; int ent_id[24], ent_k[24], ent_target[24], ent_tries[24], ent_fail[24], ne, ei, phase, restore_skill, last_sel, saw_cast, before;
+} g_rs;
+static void sum_send(const uint8_t *pk, int len) { g_injecting = 1; o_send(len, g_arg, (void *)pk); g_injecting = 0; }
+static void sum_select(int skill) { uint8_t pk[9] = {0x3c, (uint8_t)skill, (uint8_t)(skill >> 8), 0, 0, 0xff, 0xff, 0xff, 0xff}; sum_send(pk, 9); }
+static void sum_finish(const char *why, DWORD now) {
+    g_refill = 2;                                                             // the next request the server processes puts the mana back
+    sum_select(g_rs.restore_skill ? g_rs.restore_skill : (g_rs.ne > 0 ? g_rs.ent_id[g_rs.ne - 1] : 0));    // also puts the selected skill back, and makes sure a request arrives
+    g_rs.state = 0; g_scan_enable_at = now + 4000;                             // pets need a moment to appear before we start counting again
+    logf_("summons: %s", why);
+}
+static void sum_on_send(const unsigned char *b, int size) {                   // remember which skill the game has selected, to put it back afterwards
+    if (b[0] == 0x3c && size >= 9) g_cur_skill[(b[4] & 0x80) ? 1 : 0] = b[1] | (b[2] << 8);
+}
+static void sum_step(DWORD now) {
+    if (g_rs.state == 0 && g_join_seq != g_join_seen) {                       // a new game: is there something to bring back?
+        g_join_seen = g_join_seq; g_cur_skill[0] = g_cur_skill[1] = 0;
+        if (g_char_class == 5) {
+            sum_file_load();
+            if (g_saved_n > 0) { g_rs.state = 1; g_rs.start = now; logf_("summons: %s had %d kind(s) of summon last time; recasting once the game is ready", g_char, g_saved_n); }
+            else { g_scan_on = 1; logf_("summons: nothing to bring back for %s", g_char); }
+        }
+    }
+    if (g_rs.state == 0) { if (g_scan_enable_at && (int)(now - g_scan_enable_at) >= 0) { g_scan_enable_at = 0; g_scan_on = 1; } return; }
+    if (g_arg < 0 || g_dm_active_flag) return;
+    int x, y;
+    if (g_rs.state == 1) {
+        if (now - g_rs.start > 60000) { g_rs.state = 0; logf_("summons: gave up waiting for the game to be ready (the saved list is kept)"); return; }
+        if (now - g_rs.start < 1200 || !ap_player_pos(&x, &y) || g_sum_n == 0 || !g_srv_game) return;
+        g_rs.ne = 0;
+        for (int i = 0; i < g_saved_n; i++) {
+            int k = sum_index(g_saved_id[i]); if (k < 0 || g_rs.ne >= 24) continue;
+            int e = g_rs.ne++;
+            g_rs.ent_id[e] = g_saved_id[i]; g_rs.ent_k[e] = k; g_rs.ent_tries[e] = 0; g_rs.ent_fail[e] = 0;
+            g_rs.ent_target[e] = g_saved_cnt[i];                                     // aim for the old count; a cast that makes several pets (ravens) gets there in one go, one-per-cast pets (wolves, vines in a mod that allows several) take more
+        }
+        if (!g_rs.ne) { g_rs.state = 0; g_scan_on = 1; return; }
+        g_refill = 1;
+        g_rs.restore_skill = g_cur_skill[0]; g_rs.last_sel = 0; g_rs.ei = 0; g_rs.phase = 0; g_rs.next = now; g_rs.run_start = now; g_rs.state = 2;
+        logf_("summons: bringing back %d kind(s); mana is topped up before each cast and left full afterwards", g_rs.ne);
+        return;
+    }
+    if (now - g_rs.run_start > 30000) { sum_finish("took too long; stopped", now); return; }
+    if ((int)(now - g_rs.next) < 0) return;
+    if (g_rs.ei >= g_rs.ne) { sum_finish("done", now); return; }
+    if (!ap_player_pos(&x, &y)) return;
+    int e = g_rs.ei, k = g_rs.ent_k[e], alive[24];
+    if (g_rs.phase == 0) {                                                   // select (if needed) and cast, back to back
+        sum_count_alive(g_srv_game, alive, 0); g_rs.before = alive[k];
+        if (alive[k] >= g_rs.ent_target[e]) { g_rs.ei++; return; }           // already enough of this one
+        int sk = g_rs.ent_id[e];
+        if (sk != g_rs.last_sel) { sum_select(sk); g_rs.last_sel = sk; }
+        uint8_t pk[5] = {0x0c, (uint8_t)x, (uint8_t)(x >> 8), (uint8_t)y, (uint8_t)(y >> 8)}; sum_send(pk, 5);
+        g_rs.ent_tries[e]++;
+        g_rs.phase = 1; g_rs.cast_t = now; g_rs.saw_cast = 0; g_rs.next = now + 40;
+    } else if (g_rs.phase == 1) {                                            // wait for her cast animation to start and finish (animation mode back to neutral / town neutral)
+        DWORD pl = g_srv_player; int mode = -1;
+        if (pl && readable((const void *)pl, 0x20)) mode = (int)*(DWORD *)(pl + 0x10);
+        int idle = mode == 1 || mode == 5;
+        if (mode >= 0 && !idle) g_rs.saw_cast = 1;
+        if ((g_rs.saw_cast && idle) || now - g_rs.cast_t > 1500 || (!g_rs.saw_cast && now - g_rs.cast_t > 500)) { sum_select(g_rs.ent_id[e]); g_rs.phase = 2; g_rs.idle_t = now; g_rs.next = now; }      // the extra select makes the server run its mana top-up right after the cast
+        else g_rs.next = now + 20;
+    } else {                                                                 // did the pet count go up? give it a moment to show up, retry the cast if not
+        sum_count_alive(g_srv_game, alive, 0);
+        if (alive[k] > g_rs.before || now - g_rs.idle_t > 600) {
+            g_rs.ent_fail[e] = alive[k] > g_rs.before ? 0 : g_rs.ent_fail[e] + 1;                              // a cast that adds nothing: ignored once (retry), or the limit is reached (stop)
+            if (alive[k] >= g_rs.ent_target[e] || g_rs.ent_tries[e] >= g_rs.ent_target[e] + 2 || g_rs.ent_fail[e] >= 2) g_rs.ei++;
+            g_rs.phase = 0; g_rs.next = now + 20;
+        } else g_rs.next = now + 40;
+    }
+}
+static void sum_on_recv(const uint8_t *b, int len) { (void)b; (void)len; }
 
 static DWORD WINAPI equip_thread(LPVOID arg) {
     (void)arg;
@@ -742,7 +983,7 @@ static int __stdcall h_setmode(DWORD unit, int mode) {
         for (int i = 0; i < g_hire_n; i++) if ((DWORD)g_hire_ids[i] == cls) {
             mode = 15;
             LONG n = InterlockedIncrement(&g_merc_conv);
-            if (n == 1 || n % 200 == 0) logf_("merc run fix: mercenary (class %u) asked to walk -> run (conversion #%ld)", (unsigned)cls, (long)n);
+            if (n == 1) logf_("merc run fix: mercenary (class %u) asked to walk -> run (conversion #%ld)", (unsigned)cls, (long)n);
             break;
         }
     }
@@ -933,6 +1174,7 @@ static DWORD WINAPI worker(LPVOID arg) {
 #endif
     CreateThread(NULL, 0, merc_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, equip_thread, NULL, 0, NULL);
+    CreateThread(NULL, 0, summon_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, patch_thread, NULL, 0, NULL);
     QueryPerformanceFrequency(&g_freq);
     logf_("qoltweaks loaded: enabled=%d range=%d rejuv_always=%d", cfg.enabled, cfg.range, cfg.rejuv_always);

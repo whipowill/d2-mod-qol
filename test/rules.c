@@ -151,6 +151,16 @@ int main(void) {
       { const char *m2 = "Id\thcIdx\tAI\r\nskeleton\t0\tSkeleton\r\nroguehire\t1\tHireable\r\nExpansion\t\t\r\nact5hire1\t560\tHireable\r\nact5hire2\t561\tHireable\r\n";
         int i2[8]; int n2 = ap_parse_monstats(m2, (int)strlen(m2), i2, 8);
         CHECK("monstats: the explicit hcIdx column is used when present", n2 == 3 && i2[0] == 1 && i2[1] == 560 && i2[2] == 561); }
+      { const char *sk = "skill\tId\tcharclass\tsummon\tpettype\tpetmax\tParam3\r\nRaven\t221\tdru\tdruidhawk\travens\tmin(lvl,par2)\t0\r\nSummon Spirit Wolf\t227\tdru\tspiritwolf\tspiritwolf\tmin(lvl,par3)\t5\r\nFire Bolt\t36\tsor\t\t\t\t\r\nRaise Skeleton\t70\tnec\tskeleton\tskel\t3\t\r\n";
+        ap_summon_t ss[8]; int ns = ap_parse_skills(sk, (int)strlen(sk), ss, 8);
+        CHECK("skills: only druid summons are read", ns == 2 && ss[0].id == 221 && ss[1].id == 227);
+        CHECK("skills: wolves repeat by Param3, ravens once", ss[0].repeat == 1 && ss[1].repeat == 5 && !strcmp(ss[1].pet, "spiritwolf"));
+        { const char *ms = "Id\thcIdx\tAI\r\nskeleton\t0\tx\r\ndruidhawk\t1\tx\r\nExpansion\t\t\r\nspiritwolf\t560\tx\r\n";
+          char nm[3][24] = {"druidhawk", "spiritwolf", "nothere"}; int o[3];
+          CHECK("monster ids by name use hcIdx", ap_monster_ids(ms, (int)strlen(ms), (const char (*)[24])nm, 3, o) == 2 && o[0] == 1 && o[1] == 560 && o[2] == -1);
+          const char *m2 = "Id\tAI\r\nskeleton\tx\r\nExpansion\t\r\nspiritwolf\tx\r\n";
+          CHECK("monster ids by name without hcIdx skip the divider", ap_monster_ids(m2, (int)strlen(m2), (const char (*)[24])nm, 3, o) == 1 && o[1] == 1); }
+        CHECK("skills: another table is ignored", ap_parse_skills("a\tb\r\n1\t2\r\n", 12, ss, 8) == 0); }
       CHECK("monstats: unexpected table is ignored", ap_parse_monstats("a\tb\r\n1\t2\r\n", 12, ids, 8) == 0); }
     // ---- real PD2 packets (copied from qol.log): the quantity must decode ----
     { static const struct { const char *hex; int qty; const char *name; } real[] = {

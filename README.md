@@ -2,6 +2,8 @@
 
 A game mod for Diablo 2 introducing various quality-of-life features and bug fixes.
 
+**Note this was designed for D2LOD v1.13 and will not work on version 1.14.**
+
 ## Features
 
 - **Auto Click** - hold spacebar to generate repeated left mouse clicks
@@ -10,7 +12,8 @@ A game mod for Diablo 2 introducing various quality-of-life features and bug fix
 - **Merc Equip** - mercs can now equip various item types consistent w/ their class (including quivers)
 - **Merc Drop** - mercs will now drop their gear if you hire a new one
 - **No XP Penalty** - no longer penalizes you for fighting low lvl monsters, or partying high level friends
-- **Death Gear** - no longer lose your gear when you die
+- **Death Keep** - no longer lose your gear when you die
+- **Druid Summons** - leave with your wolves, bear, vines and ravens out and they're back, free, when you load in
 
 All of these features are optional and toggled in the ``qol.ini`` file.
 

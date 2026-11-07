@@ -247,9 +247,9 @@ Changes apply at next game launch. `logging=0` removes the log file, the profili
 `verbose`, `pd2_equip`.
 
 ### Diagnostics
-Only one diagnostic stays compiled in (active with `logging=1`): the `merc class test:` lines from the class stub (reached only after the merc passes the str/dex/level checks, capped at 30 lines) - useful for any class-restriction
-question. The quiver-hunt diagnostics (server equip wrappers, post-equip slot dump / F10, item-packet log, `Rogue quiver check:` lines) were removed once everything was confirmed; `wrap_server_fn`-style wrappers are easy to recreate
-(a stub that re-pushes the stack args, calls the displaced original through a trampoline and logs eax).
+No debugging output is compiled in beyond the normal one-line-per-event log (what was loaded/patched, errors, `summons:` lifecycle lines, `merc drop:` hold/release). The quiver-hunt and summon-prototype
+diagnostics were removed once everything was confirmed; they are easy to recreate (a stub that re-pushes the stack args, calls the displaced original through a trampoline and logs eax; logging the 0x3c/0x0c requests;
+logging 9c/9d item packets in h_recv).
 
 ### Techniques that paid off
 - `./build.sh mercdebug` -> `.out/mercdebug/qol.dll`: IAT-traces every D2Game->D2Common call whose first four args are a hireling unit, tallied by (ordinal, D2Game call site, arg index) and written every ~2 s to `mercdebug.log`;
@@ -261,11 +261,27 @@ question. The quiver-hunt diagnostics (server equip wrappers, post-equip slot du
 - Wrong-lead log (so we do not repeat it): merc "run" at 6fc38112; IsBadReadPtr; trusting a 152-entry pointer table to be the packet table; calling server routines from inside the hire request; assuming row numbers are ids.
 
 ---------------------------------------------------------------------------------------------------------------------------------
-## 11. Deferred idea: Act 5 merc Whirlwind (data-only, unconfirmed)
+## 11. Druid summons (`[summons] enabled`) - built, awaiting the first in-game test
+- Goal: remember the live summons when you leave a game and bring them back (free, fast) on the next load, like PD2. Druid only; Windows/1.13d D2Game only.
+- What failed: calling the skill runner D2Game 6fc35800 (ecx=game, edx=caster, stack skill id, level) directly ran without error but created no pets (the summon handlers 114 raven /
+  115 vines / 119 wolves,bear,totems at table 0x6fd2b818 need the target state a real cast sets up). Skill lookup facts found on the way: the unit's skills are at unit+0xA8 (+4 first skill, skill+4
+  next, +0x28 base level, skill record id word at +0); D2Common #10007 = GetSkillLevel(unit, skill, includeBonuses) (base + item bonuses); #10429 is NOT skill lookup (it walks stat lists).
+- What works as the design: replay the game's own requests. Select skill (right hand): `3c <id lo> <id hi> 00 00 ff ff ff ff` (byte 4 = 0x80 for the left hand); cast right skill at a location: `0c <x lo hi> <y lo hi>`
+  (0x0f = held). Mana: the first approach (zeroing the cost words of the skills' Skills.txt records in memory: table at `**(D2Game+0xf8260)` + 0xb98, 0x23c bytes per record, start +0x184, min +0x186, shift +0x188, base +0x18a,
+  per level +0x18c) was dropped in favour of the user's idea: while recasting, the server tick (which runs before every client request is handled) sets the player's mana (stat 8) to max mana (stat 9) with D2Common
+  `GetUnitStat` #10550 (unit, stat, layer) / `SetUnitStat` #10590 (unit, stat, value, layer), and when the recast ends leaves it full (`g_refill` 1 = refill before each request, and a harmless re-select is sent right after every cast so it also happens straight after it, 2 = final top-up; the first version restored the starting value, which discarded the refill and looked like the casts cost mana). The client side always sends one
+  more request at the end (re-select skill) so the restore is processed immediately. All druid summons have InTown=1, so they work in town.
+- Live pets: the game's monster table is 128 chains at game+0x1320 (next unit at +0xe4); unit+0 type 1, +4 class, +0x10 mode (0 dying, 12 dead). Pet classes = MonStats classes named by Skills.txt `summon`.
+  `qt_srv_tick` (hooked into the packet dispatcher, RVA 0x674ae, which gives (game, player) on the server thread) counts them every 2 s and writes `qol_summons.txt` (`NAME=skillid:count,...`) when it changes.
+  Character name = unit+0x14 -> player data (name at +0), class = unit+4 (5 = Druid). Saving starts only after the restore finished (`g_scan_on`), so a fresh game can't overwrite the list.
+- Restore: `sum_step` (client, from h_recv) after a new game: wait 3 s and a known position, build jobs (wolves/fenris: min(count, Param3) casts; everything else once), zero costs, send select + cast spaced 150 ms / 950 ms,
+  restore the previously selected skill (only known if the game sent a 0x3c earlier) and the costs.
+
+## 12. Deferred idea: Act 5 merc Whirlwind (data-only, unconfirmed)
 The user wants the Act 5 merc to use Whirlwind (PD2 has a whirlwind animation LoD lacks). Plan: add a `MonWhirlwind` row to loose `Skills.txt` (PD2 definition, new id) and a 5th skill slot with mode 14 for the Barbarian rows in loose
 `Hireling.txt`. `mSQ` is already 1 for act5hire1/2, and SQ skills replay A1 frames (the Desert Mercenary's Jab is mode 14 with no SQ files). Concern: the merc may disappear while whirlwinding if there are no frames for that mode; the user
 suggested borrowing animations from the Ancient boss who whirlwinds. Never started; the user said "let's revisit this after we fix the merc equip issue" (the equip work is done; this is the one thing left).
 
-## 12. Housekeeping reminders (user side)
+## 13. Housekeeping reminders (user side)
 Rename the repo folder to match if not done; replace old `autopilot`/`qolfixes` files in game folders; update `PlugY.ini` `DllToLoad` to `qol.dll`; the LoD game's `qol.ini` currently has `[mercenary] run=1 equip=1` (+ `drop_items`).
 BaseMod.ini in that folder has `FullEquip=0, RogueCrossBow=0, RogueAmaBow=0`.

@@ -548,3 +548,70 @@ void ap_dump(char *buf, int n) {
 
 int ap_cursor_busy(void) { return cursor_id != 0; }
 uint32_t ap_cursor_id(void) { return cursor_id; }
+
+int ap_player_pos(int *x, int *y) { if (!have_pos) return 0; if (x) *x = px; if (y) *y = py; return 1; }
+
+int ap_parse_skills(const char *txt, int len, ap_summon_t *out, int max) {
+    int c_id = -1, c_cls = -1, c_sum = -1, c_pet = -1, c_max = -1, c_p3 = -1, line = 0, n = 0;
+    const char *end = txt + len;
+    while (txt < end) {
+        const char *eol = memchr(txt, '\n', (size_t)(end - txt));
+        if (!eol) eol = end;
+        const char *f = txt; int idx = 0;
+        char id[16] = "", cls[16] = "", sum[40] = "", pet[16] = "", pmax[80] = "", p3[16] = "";
+        for (const char *q = txt; q <= eol; q++) {
+            if (q != eol && *q != '\t') continue;
+            int fl = (int)(q - f);
+            if (fl > 0 && f[fl - 1] == '\r') fl--;
+            if (line == 0) {
+                if (fl == 2 && !memcmp(f, "Id", 2)) c_id = idx;
+                else if (fl == 9 && !memcmp(f, "charclass", 9)) c_cls = idx;
+                else if (fl == 6 && !memcmp(f, "summon", 6)) c_sum = idx;
+                else if (fl == 7 && !memcmp(f, "pettype", 7)) c_pet = idx;
+                else if (fl == 6 && !memcmp(f, "petmax", 6)) c_max = idx;
+                else if (fl == 6 && !memcmp(f, "Param3", 6)) c_p3 = idx;
+            } else {
+                char *dst = idx == c_id ? id : idx == c_cls ? cls : idx == c_sum ? sum : idx == c_pet ? pet : idx == c_max ? pmax : idx == c_p3 ? p3 : 0;
+                int cap = idx == c_id ? 16 : idx == c_cls ? 16 : idx == c_sum ? 40 : idx == c_pet ? 16 : idx == c_max ? 80 : idx == c_p3 ? 16 : 0;
+                if (dst) { int m = fl < cap - 1 ? fl : cap - 1; memcpy(dst, f, (size_t)m); dst[m] = 0; }
+            }
+            idx++; f = q + 1;
+        }
+        if (line == 0 && (c_id < 0 || c_cls < 0 || c_sum < 0)) return 0;                // not the table we expected
+        if (line > 0 && n < max && !strcmp(cls, "dru") && sum[0] && id[0]) {
+            out[n].id = atoi(id);
+            snprintf(out[n].pet, sizeof out[n].pet, "%s", pet);
+            snprintf(out[n].mon, sizeof out[n].mon, "%s", sum);
+            int rep = 1; if (strstr(pmax, "par3") && p3[0]) { rep = atoi(p3); if (rep < 1) rep = 1; if (rep > 8) rep = 8; }
+            out[n].repeat = rep; n++;
+        }
+        line++; txt = eol + 1;
+    }
+    return n;
+}
+
+int ap_monster_ids(const char *txt, int len, const char (*names)[24], int n, int *out) {
+    int c_hc = -1, line = 0, found = 0, dividers = 0;
+    const char *end = txt + len;
+    for (int i = 0; i < n; i++) out[i] = -1;
+    while (txt < end) {
+        const char *eol = memchr(txt, '\n', (size_t)(end - txt));
+        if (!eol) eol = end;
+        const char *f = txt; int idx = 0; char id[40] = "", hc[16] = "";
+        for (const char *q = txt; q <= eol; q++) {
+            if (q != eol && *q != '\t') continue;
+            int fl = (int)(q - f);
+            if (fl > 0 && f[fl - 1] == '\r') fl--;
+            if (line == 0) { if (idx == 0 && !(fl == 2 && !memcmp(f, "Id", 2))) return 0; if (fl == 5 && !memcmp(f, "hcIdx", 5)) c_hc = idx; }
+            else if (idx == 0) { int m = fl < 39 ? fl : 39; memcpy(id, f, (size_t)m); id[m] = 0; }
+            else if (idx == c_hc) { int m = fl < 15 ? fl : 15; memcpy(hc, f, (size_t)m); hc[m] = 0; }
+            idx++; f = q + 1;
+        }
+        if (line > 0) {
+            if (!strcmp(id, "Expansion")) dividers++;
+            else for (int i = 0; i < n; i++) if (!strcmp(id, names[i]) && out[i] < 0) { out[i] = hc[0] ? atoi(hc) : line - 1 - dividers; found++; }
+        }
+        line++; txt = eol + 1;
+    }
+    return found;
+}

@@ -20,6 +20,14 @@ void ap_reset_learned(void);   // forget learned stack sizes (tests)
 int ap_parse_misc(const char *txt, int len);
 // Feed the game's MonStats.txt: fills ids[] with the class ids of mercenaries (AI = Hireable). Returns how many (0 = unexpected table).
 int ap_parse_monstats(const char *txt, int len, int *ids, int max);
+// Druid summon skills from the game's Skills.txt (charclass dru with a `summon`): id, the pet type (summons of one type replace each other) and how many casts
+// bring a full set back (the `Param3` limit when the pet limit uses it, as with the wolves; otherwise 1). Returns how many, 0 if it isn't that table.
+typedef struct { int id; char pet[16]; char mon[24]; int repeat; } ap_summon_t;      // mon = the pet's MonStats Id
+int ap_parse_skills(const char *txt, int len, ap_summon_t *out, int max);
+int ap_player_pos(int *x, int *y);
+// Class ids of monsters by their MonStats `Id` name (explicit hcIdx column when the table has one, else the row number without "Expansion" divider rows).
+// out[i] = -1 when names[i] is not in the table. Returns how many were found, 0 if it isn't that table.
+int ap_monster_ids(const char *txt, int len, const char (*names)[24], int n, int *out);   // last known position of the player (0 = unknown)
 
 // Feed every server->client packet (raw buffer as returned by D2Net receive) and every client->server packet.
 void ap_on_recv(const uint8_t *p, int len);
