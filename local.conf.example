@@ -1,0 +1,10 @@
+# Copy to local.conf (gitignored) and fill in for your machine.
+# Format: KEY=value, "~" is expanded.
+# GAME_DIR: the game folder (where Game.exe / the game's .mpq files live); qol.dll gets installed here
+GAME_DIR=~/path/to/Diablo II
+# GAME_MPQS: comma-separated data archives inside GAME_DIR, highest priority first
+#   Diablo II LoD 1.13c:  patch_d2.mpq,d2exp.mpq,d2data.mpq
+#   Project Diablo 2:     pd2data.mpq
+GAME_MPQS=patch_d2.mpq,d2exp.mpq,d2data.mpq
+# MPQX_DIR: folder containing mpqx.py (MPQ reader), only needed by tools/gen_tables.py
+MPQX_DIR=~/path/to/mpqx/tools
