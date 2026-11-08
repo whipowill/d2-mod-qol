@@ -8,6 +8,8 @@ typedef struct {
     int range;        // max distance (tiles, Chebyshev) from player to ground potion
     int verbose;      // 0 = quiet, 1 = decisions, 2 = also parsed item events
     int rejuv_always; // 1 = pick up every rejuvenation potion even if the belt has no room/column for it
+    int gold;         // 1 = also pick up gold piles on the ground
+    int poll_ms;      // how often (ms) to look for items to pick up; 0 = default (120)
 } ap_config;
 
 // Logging callback supplied by the host (may be NULL).
@@ -25,6 +27,7 @@ int ap_parse_monstats(const char *txt, int len, int *ids, int max);
 typedef struct { int id; char pet[16]; char mon[24]; int repeat; } ap_summon_t;      // mon = the pet's MonStats Id
 int ap_parse_skills(const char *txt, int len, ap_summon_t *out, int max);
 int ap_player_pos(int *x, int *y);
+void ap_set_town(int in_town);                        // 1 = the player is in a town: no auto-pickups
 void ap_set_pos(int x, int y);                         // the player's real current position (tiles), when the host can read it
 // Class ids of monsters by their MonStats `Id` name (explicit hcIdx column when the table has one, else the row number without "Expansion" divider rows).
 // out[i] = -1 when names[i] is not in the table. Returns how many were found, 0 if it isn't that table.

@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include "core.h"
 #include "merc.h"
-static int fails, T = 1000, rejuv, keep_learned, bad_term;
+static int fails, T = 1000, rejuv, keep_learned, bad_term, gold;
 static void quiet(const char *m) { (void)m; }
 typedef struct { uint8_t b[64]; int pos; } bw;
 static void put(bw *w, uint32_t v, int n) { for (int i = 0; i < n; i++, w->pos++) if ((v >> i) & 1) w->b[w->pos >> 3] |= 1 << (w->pos & 7); }
@@ -42,7 +42,7 @@ static void recv_stack(int act, uint32_t id, int mode, int page, int x, int y, c
 #define KGROUND(id, dx, qty) recv_stack(0, id, 3, 0, 10000 + (dx), 10001, "key", qty, 0x10)
 static void start(const char *beltcode) {
     if (!keep_learned) ap_reset_learned();
-    ap_config c = {1, 4, 0, rejuv}; ap_init(&c, quiet);
+    ap_config c = {1, 4, 0, rejuv, gold}; ap_init(&c, quiet);
     uint8_t g[8] = {0x01, 0, 4, 0, 0x10, 0, 1, 0}; ap_on_recv(g, 8);                         // game flags: new game
     uint8_t p[11] = {0x15, 0, 1, 0, 0, 0, 0x10, 0x27, 0x10, 0x27, 1}; ap_on_recv(p, 11);   // player at (10000,10000)
     if (beltcode) equip_belt(beltcode);
@@ -132,6 +132,19 @@ int main(void) {
     start("lbl"); BELT(0, 100, "hp1"); GROUND(95, 2, "mp1");
     CHECK("rejuv_always does not affect other potions", tick() == 0);
     rejuv = 0;
+    // ---- gold ----
+    gold = 0; start("lbl"); GROUND(96, 2, "gld");
+    CHECK("gold ignored when gold=0", tick() == 0);
+    gold = 1; start("lbl"); GROUND(97, 2, "gld");
+    CHECK("gold taken when gold=1", tick() == 97);
+    start("lbl"); GROUND(98, 9, "gld");
+    CHECK("gold out of range is left alone", tick() == 0);
+    gold = 0;
+    // ---- town ----
+    start("lbl"); BELT(0, 100, "hp1"); GROUND(99, 2, "hp1"); ap_set_town(1);
+    CHECK("no pickups in town", tick() == 0);
+    ap_set_town(0);
+    CHECK("pickups resume outside town", tick() == 99);
     // a re-announcement of the same unchanged tome with a different action byte must not clear "full"
     start("lbl"); recv_item(4, 201, 0, 1, 0, 0, "tbk"); GROUND(180, 2, "tsc"); tick();
     { uint8_t r[6] = {0x0a, 4, 180, 0, 0, 0}; ap_on_recv(r, 6); } GROUND(180, 2, "tsc");

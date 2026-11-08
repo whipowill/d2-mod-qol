@@ -39,6 +39,7 @@ typedef struct { uint32_t id; int kind, tier; char code[5]; } belt_t;
 static ap_config cfg;
 static ap_logfn logfn;
 static ground_t ground[MAX_GROUND];
+static int in_town;                      // player is in a town: no pickups
 static belt_t belt[MAX_BELT];
 static int belt_cap = 4;              // until we see the equipped belt
 static int last_qty = -1;             // quantity decoded from the most recent stackable item packet (tests)
@@ -74,6 +75,7 @@ static void say(const char *fmt, ...) {
 // cls 1 = potion (kind 0 health, 1 mana, 2 rejuv, 3 stamina; tier: higher is better)
 // cls 2 = scroll (kind 0 identify -> tome ibk, 1 town portal -> tome tbk)
 // cls 3 = key (goes into an existing key stack in the inventory)
+// cls 4 = gold (added straight to your gold, never touches the cursor)
 static int classify(const char *c, int *cls, int *kind, int *tier) {
     *tier = 1;
     if (c[0] == 'h' && c[1] == 'p' && c[2] >= '1' && c[2] <= '5' && !c[3]) { *cls = 1; *kind = 0; *tier = c[2] - '0'; return 1; }
@@ -81,6 +83,7 @@ static int classify(const char *c, int *cls, int *kind, int *tier) {
     if (!strcmp(c, "rvs")) { *cls = 1; *kind = 2; *tier = 1; return 1; }
     if (!strcmp(c, "rvl")) { *cls = 1; *kind = 2; *tier = 2; return 1; }
     if (!strcmp(c, "vps")) { *cls = 1; *kind = 3; return 1; }
+    if (!strcmp(c, "gld")) { *cls = 4; *kind = 0; return 1; }
     if (!strcmp(c, "key")) { *cls = 3; *kind = 0; return 1; }
     if (!strcmp(c, "isc")) { *cls = 2; *kind = 0; return 1; }
     if (!strcmp(c, "tsc")) { *cls = 2; *kind = 1; return 1; }
@@ -505,12 +508,13 @@ static int potion_wanted(int kind, int tier) { return (cfg.rejuv_always && kind 
 static int wanted(const ground_t *g) {
     if (g->cls == 1) return potion_wanted(g->kind, g->tier);
     if (g->cls == 3) return key_fits(g->qty);
+    if (g->cls == 4) return cfg.gold;
     return tome_has_room(g->kind);
 }
 
 int ap_tick(uint32_t now, uint8_t out[16]) {
     now_ms = now;
-    if (!cfg.enabled || !have_pos || now - last_tick < TICK_MS) return 0;
+    if (!cfg.enabled || !have_pos || in_town || now - last_tick < (uint32_t)(cfg.poll_ms > 0 ? (cfg.poll_ms < 20 ? 20 : cfg.poll_ms > 2000 ? 2000 : cfg.poll_ms) : TICK_MS)) return 0;
     last_tick = now;
     // A cursor item we never saw leave would block every pickup for the rest of the game: expire it.
     if (cursor_id && now - cursor_t > 20000) { say("cursor item %u unchanged for 20 s: assuming it is gone", cursor_id); cursor_id = 0; }
@@ -532,6 +536,7 @@ int ap_tick(uint32_t now, uint8_t out[16]) {
     g->tries++; g->last_try = now; g->try_dist = bestd; last_pick = now;
     if (g->cls == 2) { scroll_pend_id = g->id; scroll_pend_kind = g->kind; }
     else if (g->cls == 3) { key_pend_id = g->id; key_pend_qty = g->qty; }
+    else if (g->cls == 4) { /* gold: nothing to track */ }
     else { pot_pend_id = g->id; pot_pend_fitted = potion_fits(g->kind, g->tier); }
     memset(out, 0, 16);
     out[0] = 0x16; out[1] = 4;
@@ -549,6 +554,7 @@ void ap_dump(char *buf, int n) {
 int ap_cursor_busy(void) { return cursor_id != 0; }
 uint32_t ap_cursor_id(void) { return cursor_id; }
 
+void ap_set_town(int t) { in_town = t; }
 void ap_set_pos(int x, int y) { px = x; py = y; have_pos = 1; }
 int ap_player_pos(int *x, int *y) { if (!have_pos) return 0; if (x) *x = px; if (y) *y = py; return 1; }
 

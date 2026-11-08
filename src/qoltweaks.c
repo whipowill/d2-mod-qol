@@ -210,6 +210,17 @@ static void live_player_pos(void) {
     if (!path || !readable((const void *)path, 8)) return;
     int x = *(WORD *)(path + 2), y = *(WORD *)(path + 6);
     if (x > 0 && y > 0) ap_set_pos(x, y);
+    // Which level is she on? path+0x1c room1 -> +0x10 room2 -> +0x58 level -> +0x1d0 level number (the usual 1.13 layout). Towns: 1, 40, 75, 103, 109.
+    // If any link is unreadable we say "not town" (pickups keep working) rather than block them.
+    static int last_lvl = -1;
+    int lvl = 0, town = 0;
+    DWORD r1 = readable((const void *)(path + 0x1c), 4) ? *(DWORD *)(path + 0x1c) : 0;
+    DWORD r2 = r1 && readable((const void *)(r1 + 0x10), 4) ? *(DWORD *)(r1 + 0x10) : 0;
+    DWORD lv = r2 && readable((const void *)(r2 + 0x58), 4) ? *(DWORD *)(r2 + 0x58) : 0;
+    if (lv && readable((const void *)(lv + 0x1d0), 4)) lvl = (int)*(DWORD *)(lv + 0x1d0);
+    if (lvl == 1 || lvl == 40 || lvl == 75 || lvl == 103 || lvl == 109) town = 1;
+    ap_set_town(town);
+    if (lvl != last_lvl) { last_lvl = lvl; logf_("area: level %d%s", lvl, town ? " (town: auto-pickups off)" : ""); }
 }
 static int __stdcall h_send(int size, int arg, void *pkt) {
     if (g_summons && !g_injecting && size > 0 && size <= 16 && readable(pkt, size)) {
@@ -297,6 +308,7 @@ static int hook_import_ordinal(HMODULE mod, const char *dll, unsigned ord, void 
 static int g_keep_equip = 0;                                    // ini: [death] keep_equipment
 static int g_xp_nopenalty = 0;                                  // ini: [experience] no_level_penalty
 static int g_wide_halls = 0;                                    // ini: [maps] wide_halls
+static int g_cpu_fix = 0, g_cpu_throttle = 0;                    // ini: [cpu] fix, throttle_render
 static int g_merc_run = 0;                                      // ini: [mercenary] run
 static int g_clk_enabled = 1, g_clk_key = VK_SPACE, g_clk_delay = 200, g_clk_interval = 100;
 
@@ -320,8 +332,12 @@ static void load_config(ap_config *c) {
                   "enabled=1\r\n"
                   "; pick up potions within this many tiles of the player\r\n"
                   "range=4\r\n"
+                  "; how often (milliseconds) to look for items to pick up. Higher = less work per second, slower reaction (20 to 2000)\r\n"
+                  "poll_ms=120\r\n"
                   "; 1 = pick up every rejuvenation potion even if your belt has no room for it (it goes to your inventory)\r\n"
                   "rejuv_always=1\r\n"
+                  "; 1 = also pick up gold piles within range\r\n"
+                  "gold=1\r\n"
                   "\r\n"
                   "[death]\r\n"
                   "; 1 = keep your equipment when you die (the \"KeepEquip\" hex edit by SnakeByteStudios, applied in memory). Single player.\r\n"
@@ -349,6 +365,13 @@ static void load_config(ap_config *c) {
                   "; Off by default. Takes effect for areas generated after the game starts.\r\n"
                   "wide_halls=1\r\n"
                   "\r\n"
+                  "[cpu]\r\n"
+                  "; 1 = stop the game using 100% of a CPU core while idle (the well-known D2 busy-loop bug): its main loops now sleep 1 ms\r\n"
+                  "; instead of spinning. Stock LoD 1.13d only.\r\n"
+                  "fix=1\r\n"
+                  "; 1 = also skip redundant frame drawing when the game is ahead of its 25 fps logic (extra CPU saving; experimental)\r\n"
+                  "throttle_render=0\r\n"
+                  "\r\n"
                   "[clicker]\r\n"
                   "; hold a key to repeat left mouse clicks at the current cursor position\r\n"
                   "enabled=1\r\n"
@@ -367,12 +390,16 @@ static void load_config(ap_config *c) {
     g_merc_drop = master && GetPrivateProfileIntA("mercenary", "drop_items", 1, path);
     g_summons = master && GetPrivateProfileIntA("summons", "enabled", 1, path);
     g_wide_halls = master && GetPrivateProfileIntA("maps", "wide_halls", 1, path);
+    g_cpu_fix = master && GetPrivateProfileIntA("cpu", "fix", 1, path);
+    g_cpu_throttle = g_cpu_fix && GetPrivateProfileIntA("cpu", "throttle_render", 0, path);
     g_merc_special = master && GetPrivateProfileIntA("mercenary", "whirlwind", 1, path);
     g_xp_nopenalty = master && GetPrivateProfileIntA("experience", "no_level_penalty", 1, path);
     g_keep_equip = master && GetPrivateProfileIntA("death", "keep_equipment", 1, path);
     c->enabled = master && GetPrivateProfileIntA("pickup", "enabled", 1, path);
     c->range = GetPrivateProfileIntA("pickup", "range", 4, path);
     c->rejuv_always = GetPrivateProfileIntA("pickup", "rejuv_always", 1, path);
+    c->gold = GetPrivateProfileIntA("pickup", "gold", 1, path);
+    c->poll_ms = GetPrivateProfileIntA("pickup", "poll_ms", 120, path);
     g_logging = GetPrivateProfileIntA("qol", "logging", 0, path);
     c->verbose = g_logging ? 1 : 0;
     g_clk_enabled = master && GetPrivateProfileIntA("clicker", "enabled", 1, path);
@@ -1088,6 +1115,50 @@ static DWORD WINAPI maps_thread(LPVOID arg) {
     }
     return 0;
 }
+// ---- CPU fix: D2 spins a core at 100% because its main loops never idle ---------------------------------------------------
+// (known bug; fixed elsewhere by replacing D2Client.dll / D2Win.dll). Equivalent in-memory edits, found by byte pattern and gated by PE timestamp:
+//  - D2Client message pump (runs every frame): `push 0 ; call Sleep` -> `push 1` (Sleep(0) returns at once when nothing else wants the core).
+//  - D2Win idle loop (menus): `je +2 ; xor eax,eax ; push eax ; call Sleep` (sleep 0 or 20 ms) -> `nop*3 ; push 1 ; call Sleep`.
+//  - optional (throttle_render): in D2Client's frame limiter a skip-draw flag is set to 1 (ebp) instead of 0 (ebx) when no logic tick ran.
+static BYTE *exec_section(HMODULE m, size_t *len, int idx) {
+    BYTE *base = (BYTE *)m;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+    IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
+    for (int k = 0; k < nt->FileHeader.NumberOfSections; k++, sec++)
+        if ((sec->Characteristics & IMAGE_SCN_MEM_EXECUTE) && idx-- == 0) { *len = sec->Misc.VirtualSize; return base + sec->VirtualAddress; }
+    return NULL;
+}
+static DWORD pe_stamp(HMODULE m) { BYTE *b = (BYTE *)m; return ((IMAGE_NT_HEADERS *)(b + ((IMAGE_DOS_HEADER *)b)->e_lfanew))->FileHeader.TimeDateStamp; }
+static DWORD WINAPI cpu_thread(LPVOID arg) {
+    (void)arg;
+    if (!g_cpu_fix) return 0;
+    HMODULE c = NULL, w = NULL;
+    for (int i = 0; i < 600 && !(c && w); i++) { c = GetModuleHandleA("D2Client.dll"); w = GetModuleHandleA("D2Win.dll"); if (!(c && w)) Sleep(100); }
+    if (!c || !w) { logf_("cpu fix: D2Client/D2Win not loaded; not patched"); return 0; }
+    if (pe_stamp(c) != 1318970890u) { logf_("cpu fix: D2Client is not stock 1.13d; not patched"); }
+    else {
+        size_t n; BYTE *code = exec_section(c, &n, 0); unsigned char st = 0;
+        long at = code ? sig_find_cpu_pump(code, n, &st) : -1;
+        if (at < 0) logf_("cpu fix: D2Client message pump not found (or not unique); not patched");
+        else if (st == 1) logf_("cpu fix: D2Client message pump already patched");
+        else { static const BYTE one = 1; patch_bytes(code + at, &one, 1); logf_("cpu fix: D2Client message pump patched (+%lx, Sleep(0) -> Sleep(1))", (unsigned long)(code + at - (BYTE *)c)); }
+        if (g_cpu_throttle) {
+            at = code ? sig_find_cpu_throttle(code, n, &st) : -1;
+            if (at < 0) logf_("cpu fix: D2Client frame limiter not found (or not unique); throttle_render not applied");
+            else if (st == 0x2D) logf_("cpu fix: throttle_render already applied");
+            else { static const BYTE b = 0x2D; patch_bytes(code + at, &b, 1); logf_("cpu fix: throttle_render applied (+%lx)", (unsigned long)(code + at - (BYTE *)c)); }
+        }
+    }
+    if (pe_stamp(w) != 1318970449u) { logf_("cpu fix: D2Win is not stock 1.13d; not patched"); }
+    else {
+        size_t n; BYTE *code = exec_section(w, &n, 0); int patched = 0;
+        long at = code ? sig_find_cpu_win(code, n, &patched) : -1;
+        if (at < 0) logf_("cpu fix: D2Win idle loop not found (or not unique); not patched");
+        else if (patched) logf_("cpu fix: D2Win idle loop already patched");
+        else { static const BYTE p[5] = {0x90, 0x90, 0x90, 0x6A, 0x01}; patch_bytes(code + at, p, 5); logf_("cpu fix: D2Win idle loop patched (+%lx, sleep 1 ms)", (unsigned long)(code + at - (BYTE *)w)); }
+    }
+    return 0;
+}
 static DWORD WINAPI special_thread(LPVOID arg) {
     (void)arg;
     if (!g_merc_special) return 0;
@@ -1343,6 +1414,7 @@ static DWORD WINAPI worker(LPVOID arg) {
     CreateThread(NULL, 0, summon_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, special_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, maps_thread, NULL, 0, NULL);
+    CreateThread(NULL, 0, cpu_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, patch_thread, NULL, 0, NULL);
     QueryPerformanceFrequency(&g_freq);
     logf_("qoltweaks loaded: enabled=%d range=%d rejuv_always=%d", cfg.enabled, cfg.range, cfg.rejuv_always);

@@ -8,7 +8,7 @@ static void logfn(const char *m) { printf("    [core] %s\n", m); }
 static int hexparse(const char *s, uint8_t *o) { int n = 0; unsigned v; while (sscanf(s, "%2x", &v) == 1) { o[n++] = (uint8_t)v; s += 2; while (*s == ' ') s++; } return n; }
 int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "r"); if (!f) return 1;
-    ap_config c = {1, argc > 2 ? atoi(argv[2]) : 5, argc > 3 ? atoi(argv[3]) : 1, 0};
+    ap_config c = {1, argc > 2 ? atoi(argv[2]) : 5, argc > 3 ? atoi(argv[3]) : 1, 0, 0, 0};
     ap_init(&c, logfn);
     char line[1024]; uint32_t now = 1000; int ln = 0;
     while (fgets(line, sizeof line, f)) {

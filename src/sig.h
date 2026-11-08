@@ -31,6 +31,48 @@ static int sig_is_setmode(const unsigned char *p) {
     return !memcmp(p, a, sizeof a) && !memcmp(p + 9, b, sizeof b) && !memcmp(p + 16, c, sizeof c);
 }
 
+// Generic masked search: pat/mask of length len (mask byte 0 = wildcard). Returns the offset of the match if it occurs exactly once, else -1.
+static long sig_find_masked(const unsigned char *buf, size_t n, const unsigned char *pat, const unsigned char *mask, size_t len) {
+    long found = -1; int count = 0;
+    for (size_t i = 0; i + len <= n; i++) {
+        size_t k = 0;
+        while (k < len && (!mask[k] || buf[i + k] == pat[k])) k++;
+        if (k == len) { found = (long)i; count++; }
+    }
+    return count == 1 ? found : -1;
+}
+
+// CPU fix (D2Client / D2Win 1.13d). Each returns the offset of the BYTE TO CHANGE, or -1 (not exactly once). *state = current byte value.
+//  1. D2Client message pump (called every frame): `push 0 ; call ebx(Sleep) ; cmp edi,-1 ; jne ... ; pop edi ; push 200h` - Sleep(0) never idles; byte 0 -> 1.
+static long sig_find_cpu_pump(const unsigned char *buf, size_t n, unsigned char *state) {
+    static const unsigned char pat[]  = {0x6A,0x00,0xFF,0xD3,0x83,0xFF,0xFF,0x75,0x00,0x5F,0x68,0x00,0x02,0x00,0x00,0x8D,0x4C,0x24,0x00,0x51};
+    static const unsigned char mask[] = {1,0,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0,1};
+    long at = sig_find_masked(buf, n, pat, mask, sizeof pat);
+    if (at < 0 || (buf[at + 1] != 0 && buf[at + 1] != 1)) return -1;
+    if (state) *state = buf[at + 1];
+    return at + 1;
+}
+//  2. D2Win menu/idle loop: `test ecx,ecx ; je +2 ; xor eax,eax ; push eax ; call [Sleep]` (sleep 0 or 20ms) -> `nop nop nop ; push 1 ; call [Sleep]`.
+//     Returns the offset of the 5 bytes after `test ecx,ecx`; *patched = 1 if already `90 90 90 6A 01`.
+static long sig_find_cpu_win(const unsigned char *buf, size_t n, int *patched) {
+    static const unsigned char a[] = {0x85,0xC9,0x74,0x02,0x33,0xC0,0x50,0xFF,0x15,0,0,0,0};
+    static const unsigned char b[] = {0x85,0xC9,0x90,0x90,0x90,0x6A,0x01,0xFF,0x15,0,0,0,0};
+    static const unsigned char mask[] = {1,1,1,1,1,1,1,1,1,0,0,0,0};
+    long x = sig_find_masked(buf, n, a, mask, sizeof a), y = sig_find_masked(buf, n, b, mask, sizeof b);
+    if ((x >= 0) == (y >= 0)) return -1;
+    if (patched) *patched = y >= 0;
+    return (x >= 0 ? x : y) + 2;
+}
+//  3. (optional) D2Client frame limiter: `cmp [counter],16h ; jle ; mov [skipflag],ebx(0) ; jmp` -> `mov [skipflag],ebp(1)` (byte 1D -> 2D at +10).
+static long sig_find_cpu_throttle(const unsigned char *buf, size_t n, unsigned char *state) {
+    static const unsigned char pat[]  = {0x83,0x3D,0,0,0,0,0x16,0x7E,0,0x89,0x1D,0,0,0,0,0xEB};
+    static const unsigned char mask[] = {1,1,0,0,0,0,1,1,0,1,0,0,0,0,0,1};
+    long at = sig_find_masked(buf, n, pat, mask, sizeof pat);
+    if (at < 0 || (buf[at + 10] != 0x1D && buf[at + 10] != 0x2D)) return -1;
+    if (state) *state = buf[at + 10];
+    return at + 10;
+}
+
 // The level-difference XP scale (D2Game): `cmp eax,100h ; je full ; mov ecx,100h ; jmp muldiv` followed by `mov eax,edx ; ret`.
 // Making the `je` a `jmp` skips the whole scale (no XP penalty for level gaps, in either direction). Found by pattern, so it works
 // on any build that has this code (stock 1.13c, and PD2's own D2Game at a different address). Returns the offset of the

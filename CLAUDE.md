@@ -316,3 +316,16 @@ BaseMod.ini in that folder has `FullEquip=0, RogueCrossBow=0, RogueAmaBow=0`.
 - `logging` now defaults to 0 (template, written default ini, and code fallback).
 - **Defaults changed (supersedes the "settings default to off" rule in section 1):** every feature switch now defaults to 1 (pickup, rejuv_always, clicker, run, equip, drop_items, whirlwind, keep_equipment,
   no_level_penalty, wide_halls, summons) in the template ini, the written default ini and the code fallbacks. Only `logging` stays 0. Existing game-folder `qol.ini` files keep their own values.
+
+## 16. CPU fix (`[cpu] fix`, `throttle_render`) - built, awaiting in-game test
+- D2 1.13d spins one core at 100%: its main loops never idle. Known fixes are binary-patched `D2Client.dll`/`D2Win.dll` (blizzhackers `Diablo2-1.13-cpuFix/Diablo-II-1.13d-cpuFix`; byte-diffed against stock: 8 bytes in 3 places).
+  d2mods.info t=62379 describes a different fix (NOP the game-type 6/8 jumps before `Sleep(10)` at D2Client 6fad7713); we do NOT use it.
+- `cpu_thread` applies the same edits in memory (gated on D2Client ts 1318970890 / D2Win ts 1318970449; exactly-once masked patterns `sig_find_cpu_*` in sig.h, checked against both stock and patched files):
+  1. D2Client message pump 6faf48c0 (called every frame from the frame function): `push 0 ; call ebx(Sleep)` at 6faf4928 -> `push 1` (file/RVA +0x44929).
+  2. D2Win idle/menu loop 6f8eedaf: `je +2 ; xor eax,eax ; push eax` (sleeps 0 or 20 ms) -> `nop nop nop ; push 1` (+0xedaf). This covers the MENU, which the d2mods thread never found.
+  3. optional `throttle_render=1` (default 0): D2Client frame limiter 6faf5e06 `mov [6fbd46f0],ebx(0)` -> `ebp(1)` (+0x45e07). That flag skips drawing the frame (set when no logic tick ran and the frame counter is above 0x16); only partly understood.
+- **Gold pickup** (`[pickup] gold`, default 1): ground item code `gld` is classified as cls 4 in core.c and picked up with the normal 0x16 request within `range`; no belt/stack/cursor tracking since gold goes straight to the purse.
+  Unit-tested with synthetic packets only (test/rules.c); a gold pile the player drops on purpose would be picked up again.
+- **No pickups in town**: `live_player_pos()` also reads the level number (player path+0x1c room1 -> +0x10 room2 -> +0x58 level -> +0x1d0 levelno; the standard 1.13 layout, unverified in game) every frame and calls `ap_set_town()`
+  for levels 1, 40, 75, 103, 109; `ap_tick` returns 0 while in town. An unreadable chain means "not town". With `logging=1` the log has `area: level N` lines to verify the offsets.
+- Does not make the game faster (logic is locked at 25/s); lowers CPU/heat only. BaseMod's `[BypassFPS]` is a separate mechanism; interaction untested.
