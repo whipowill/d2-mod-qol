@@ -1,6 +1,6 @@
 # Will Scarlet's QOL for Diablo II
 
-A game mod for Diablo 2 introducing various quality-of-life features and bug fixes.
+A game mod for Diablo II introducing various quality-of-life features and bug fixes.
 
 **Note this was designed for D2LOD v1.13 and will not work on version 1.14.**
 
@@ -14,7 +14,7 @@ A game mod for Diablo 2 introducing various quality-of-life features and bug fix
 - **Merc Equip** - mercs can equip various item types consistent w/ their class, including quivers
 - **Merc Drop** - mercs will drop their gear if you hire a new one
 - **Merc Whirlwind** - mercs can use Whirlwind-style attacks properly, if they have that skill
-- **Druid Summons** - leave with your wolves, bear, vines and ravens out and they're back, free, when you load in
+- **Druid Summons** - the minions you had when you logged out will auto respawn
 - **Wide Hallways** - Maggot Lair and Arcane Santuary now have wider hallways
 
 All of these features are optional and toggled in the ``qol.ini`` file.
