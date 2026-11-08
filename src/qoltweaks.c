@@ -20,7 +20,7 @@ static int g_summons = 0;                                        // ini: [summon
 static int g_merc_drop = 0;                                      // ini: [mercenary] drop_items
 static int g_merc_equip = 0;                                    // ini: [mercenary] equip
 #define D2GAME_TIMESTAMP_113D 1318970639u    // D2Game.dll of stock LoD 1.13d (Oct 2011)
-static int g_logging = 1;        // ini: [qol] logging=0 turns off the log file, decision logging and profiling
+static int g_logging = 0;        // ini: [qol] logging=0 turns off the log file, decision logging and profiling
 static volatile LONG g_lines;
 #define MAX_LINES 20000
 
@@ -191,12 +191,31 @@ static void sum_on_send(const unsigned char *b, int size);
 static void sum_on_recv(const uint8_t *b, int len);
 static void sum_step(DWORD now);
 static volatile int g_dm_active_flag;               // mirrors g_dm.active for the hooks above its definition
-static int g_last_send_r = 1;                        // result of the game's most recent real send
+static volatile DWORD g_sum_hold_until;              // while set (and in the future) the player's movement requests are held: a recast is in flight
+static int g_last_send_r = 1;                       // result of the game's most recent real send
+// The position the packets give us is only a walk DESTINATION while she is moving (or the last stop), so items beside the path looked out of range / the wrong distance.
+// Read the real tile position from the client's own player unit (D2Client 1.13d, pointer at +0x11D050; dynamic path: x word at +2, y word at +6).
+static void live_player_pos(void) {
+    static HMODULE cl; static int ok = -1;
+    if (ok < 0) {
+        cl = GetModuleHandleA("D2Client.dll"); ok = 0;
+        if (cl) { IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)cl + ((IMAGE_DOS_HEADER *)cl)->e_lfanew); ok = nt->FileHeader.TimeDateStamp == 1318970890u; }
+    }
+    if (ok != 1) return;
+    DWORD *pp = (DWORD *)((BYTE *)cl + 0x11D050);
+    if (!readable(pp, 4)) return;
+    DWORD u = *pp;
+    if (!u || !readable((const void *)u, 0x30) || *(DWORD *)u != 0) return;               // unit type 0 = player
+    DWORD path = *(DWORD *)(u + 0x2c);
+    if (!path || !readable((const void *)path, 8)) return;
+    int x = *(WORD *)(path + 2), y = *(WORD *)(path + 6);
+    if (x > 0 && y > 0) ap_set_pos(x, y);
+}
 static int __stdcall h_send(int size, int arg, void *pkt) {
     if (g_summons && !g_injecting && size > 0 && size <= 16 && readable(pkt, size)) {
         sum_on_send(pkt, size);
         const unsigned char *b = pkt;
-        if (g_sum_busy && b[0] >= 0x01 && b[0] <= 0x10) return g_last_send_r;                  // while the summons are being recast, hold the player's own walk / run / attack / cast requests (they would cancel the casts)
+        (void)b;                                                                               // the player's own requests are never held: the recast waits for her to stand still instead
     }
     if (g_merc_drop && !g_injecting && size == 9 && readable(pkt, 9) && ((const unsigned char *)pkt)[0] == 0x36 && !g_dm_active_flag
         && dm_begin(pkt, size, arg, g_arg >= 0)) return g_last_send_r;      // the hire request is held back until the merc's gear is dropped
@@ -224,6 +243,7 @@ static int __stdcall h_recv(void *buf, int cap) {
     misc_tick();
     if (g_summons) sum_step(GetTickCount());
     if (g_dm_active_flag) dm_step(GetTickCount());
+    live_player_pos();
     uint8_t out[16];
     int n = g_dm_active_flag ? 0 : ap_tick(GetTickCount(), out);
     if (n > 0 && g_arg >= 0) {                           // only once we know how the game calls SendPacket
@@ -276,6 +296,7 @@ static int hook_import_ordinal(HMODULE mod, const char *dll, unsigned ord, void 
 
 static int g_keep_equip = 0;                                    // ini: [death] keep_equipment
 static int g_xp_nopenalty = 0;                                  // ini: [experience] no_level_penalty
+static int g_wide_halls = 0;                                    // ini: [maps] wide_halls
 static int g_merc_run = 0;                                      // ini: [mercenary] run
 static int g_clk_enabled = 1, g_clk_key = VK_SPACE, g_clk_delay = 200, g_clk_interval = 100;
 
@@ -292,7 +313,7 @@ static void load_config(ap_config *c) {
                   "; master switch for everything: 1 = on, 0 = off\r\n"
                   "enabled=1\r\n"
                   "; 1 = write qol.log (decisions, errors), 0 = no log file at all\r\n"
-                  "logging=1\r\n"
+                  "logging=0\r\n"
                   "\r\n"
                   "[pickup]\r\n"
                   "; potion auto-pickup: 1 = on, 0 = off\r\n"
@@ -300,28 +321,33 @@ static void load_config(ap_config *c) {
                   "; pick up potions within this many tiles of the player\r\n"
                   "range=4\r\n"
                   "; 1 = pick up every rejuvenation potion even if your belt has no room for it (it goes to your inventory)\r\n"
-                  "rejuv_always=0\r\n"
+                  "rejuv_always=1\r\n"
                   "\r\n"
                   "[death]\r\n"
                   "; 1 = keep your equipment when you die (the \"KeepEquip\" hex edit by SnakeByteStudios, applied in memory). Single player.\r\n"
                   "; Off by default.\r\n"
-                  "keep_equipment=0\r\n"
+                  "keep_equipment=1\r\n"
                   "\r\n"
                   "[experience]\r\n"
                   "; 1 = no XP penalty for level differences, in either direction: a high-level character still gets full XP from\r\n"
                   "; low-level monsters, and a low-level character still gets full XP from high-level monsters (e.g. when partied with a\r\n"
                   "; high-level character). Single player. Off by default.\r\n"
-                  "no_level_penalty=0\r\n"
+                  "no_level_penalty=1\r\n"
                   "\r\n"
                   "[mercenary]\r\n"
                   "; 1 = mercenaries run when they follow you instead of always walking (fixes a bug in stock LoD 1.13d).\r\n"
                   "; Off by default. Only does anything on stock LoD 1.13d.\r\n"
-                  "run=0\r\n"
+                  "run=1\r\n"
                   "; 1 = mercenaries can equip a wider range of items: Rogue: bows, crossbows; Desert: polearms, spears (also Amazon),\r\n"
                   "; javelins; Iron Wolf: shields, 1H swords, wands, scepters, maces, orbs; Barbarian: swords, axes, maces, hammers,\r\n"
                   "; Barbarian helms; every merc: rings, amulets, boots, gloves, belts. Replaces BaseMod's [MercMod] options: set\r\n"
                   "; FullEquip=0, RogueCrossBow=0, RogueAmaBow=0 in BaseMod.ini or this stays off. Stock LoD 1.13d only.\r\n"
-                  "equip=0\r\n"
+                  "equip=1\r\n"
+                  "\r\n"
+                  "[maps]\r\n"
+                  "; 1 = wider hallways in the Maggot Lair and the Arcane Sanctuary (map files from qol.mpq, which must sit next to qol.dll).\r\n"
+                  "; Off by default. Takes effect for areas generated after the game starts.\r\n"
+                  "wide_halls=1\r\n"
                   "\r\n"
                   "[clicker]\r\n"
                   "; hold a key to repeat left mouse clicks at the current cursor position\r\n"
@@ -336,17 +362,18 @@ static void load_config(ap_config *c) {
         }
     }
     int master = GetPrivateProfileIntA("qol", "enabled", 1, path);
-    g_merc_run = master && GetPrivateProfileIntA("mercenary", "run", 0, path);
-    g_merc_equip = master && GetPrivateProfileIntA("mercenary", "equip", 0, path);
-    g_merc_drop = master && GetPrivateProfileIntA("mercenary", "drop_items", 0, path);
-    g_summons = master && GetPrivateProfileIntA("summons", "enabled", 0, path);
-    g_merc_special = master && GetPrivateProfileIntA("mercenary", "whirlwind", 0, path);
-    g_xp_nopenalty = master && GetPrivateProfileIntA("experience", "no_level_penalty", 0, path);
-    g_keep_equip = master && GetPrivateProfileIntA("death", "keep_equipment", 0, path);
+    g_merc_run = master && GetPrivateProfileIntA("mercenary", "run", 1, path);
+    g_merc_equip = master && GetPrivateProfileIntA("mercenary", "equip", 1, path);
+    g_merc_drop = master && GetPrivateProfileIntA("mercenary", "drop_items", 1, path);
+    g_summons = master && GetPrivateProfileIntA("summons", "enabled", 1, path);
+    g_wide_halls = master && GetPrivateProfileIntA("maps", "wide_halls", 1, path);
+    g_merc_special = master && GetPrivateProfileIntA("mercenary", "whirlwind", 1, path);
+    g_xp_nopenalty = master && GetPrivateProfileIntA("experience", "no_level_penalty", 1, path);
+    g_keep_equip = master && GetPrivateProfileIntA("death", "keep_equipment", 1, path);
     c->enabled = master && GetPrivateProfileIntA("pickup", "enabled", 1, path);
     c->range = GetPrivateProfileIntA("pickup", "range", 4, path);
-    c->rejuv_always = GetPrivateProfileIntA("pickup", "rejuv_always", 0, path);
-    g_logging = GetPrivateProfileIntA("qol", "logging", 1, path);
+    c->rejuv_always = GetPrivateProfileIntA("pickup", "rejuv_always", 1, path);
+    g_logging = GetPrivateProfileIntA("qol", "logging", 0, path);
     c->verbose = g_logging ? 1 : 0;
     g_clk_enabled = master && GetPrivateProfileIntA("clicker", "enabled", 1, path);
     g_clk_key = GetPrivateProfileIntA("clicker", "key", VK_SPACE, path);
@@ -874,11 +901,11 @@ static void sum_select(int skill) { uint8_t pk[9] = {0x3c, (uint8_t)skill, (uint
 static void sum_finish(const char *why, DWORD now) {
     g_refill = 2;                                                             // the next request the server processes puts the mana back
     sum_select(g_rs.restore_skill ? g_rs.restore_skill : (g_rs.ne > 0 ? g_rs.ent_id[g_rs.ne - 1] : 0));    // also puts the selected skill back, and makes sure a request arrives
-    g_rs.state = 0; g_sum_busy = 0; g_scan_enable_at = now + 4000;                             // pets need a moment to appear before we start counting again
+    g_rs.state = 0; g_sum_busy = 0; g_sum_hold_until = 0; g_scan_enable_at = now + 4000;                             // pets need a moment to appear before we start counting again
     logf_("summons: %s", why);
 }
 static void sum_on_send(const unsigned char *b, int size) {                   // remember which skill the game has selected, to put it back afterwards
-    if (b[0] == 0x3c && size >= 9) g_cur_skill[(b[4] & 0x80) ? 1 : 0] = b[1] | (b[2] << 8);
+    if (b[0] == 0x3c && size >= 9) { g_cur_skill[(b[4] & 0x80) ? 1 : 0] = b[1] | (b[2] << 8); g_rs.last_sel = 0; }   // the player changed skill: select ours again before the next cast
 }
 static void sum_step(DWORD now) {
     if (g_rs.state == 0 && g_join_seq != g_join_seen) {                       // a new game: is there something to bring back?
@@ -894,7 +921,7 @@ static void sum_step(DWORD now) {
     int x, y;
     if (g_rs.state == 1) {
         if (now - g_rs.start > 60000) { g_rs.state = 0; logf_("summons: gave up waiting for the game to be ready (the saved list is kept)"); return; }
-        if (now - g_rs.start < 1200 || !ap_player_pos(&x, &y) || g_sum_n == 0 || !g_srv_game) return;
+        if (now - g_rs.start < 300 || !ap_player_pos(&x, &y) || g_sum_n == 0 || !g_srv_game) return;
         g_rs.ne = 0;
         for (int i = 0; i < g_saved_n; i++) {
             int k = sum_index(g_saved_id[i]); if (k < 0 || g_rs.ne >= 24) continue;
@@ -908,7 +935,7 @@ static void sum_step(DWORD now) {
         logf_("summons: bringing back %d kind(s); mana is topped up before each cast and left full afterwards", g_rs.ne);
         return;
     }
-    if (now - g_rs.run_start > 40000) { sum_finish("took too long; stopped", now); return; }
+    if (now - g_rs.run_start > 120000) { sum_finish("took too long; stopped", now); return; }
     if ((int)(now - g_rs.next) < 0) return;
     if (g_rs.ei >= g_rs.ne) { sum_finish("done", now); return; }
     if (!ap_player_pos(&x, &y)) return;
@@ -917,7 +944,11 @@ static void sum_step(DWORD now) {
     if (pl && readable((const void *)pl, 0x20)) mode = (int)*(DWORD *)(pl + 0x10);
     int moving = mode == 2 || mode == 3 || mode == 6, busy = mode >= 0 && !moving && mode != 1 && mode != 5;
     if (g_rs.phase == 0) {                                                   // cast: whatever she is doing, except in the middle of another animation
-        if (busy) { g_rs.next = now + 30; return; }
+        static DWORD still_since;                                            // cast only once she has stood still for a moment; never interrupt walking / running
+        if (mode >= 0 && mode != 1 && mode != 5) { still_since = 0; g_rs.next = now + 10; return; }
+        if (!still_since) still_since = now;
+        if (now - still_since < 150) { g_rs.next = now + 10; return; }
+        (void)busy; (void)moving;
         sum_count_alive(g_srv_game, alive, 0); g_rs.before = alive[k];
         if (alive[k] >= g_rs.ent_target[e]) { g_rs.ei++; return; }           // already enough of this one
         int sk = g_rs.ent_id[e];
@@ -925,18 +956,19 @@ static void sum_step(DWORD now) {
         uint8_t pk[5] = {0x0c, (uint8_t)x, (uint8_t)(x >> 8), (uint8_t)y, (uint8_t)(y >> 8)}; sum_send(pk, 5);
         g_rs.ent_tries[e]++; g_rs.moved = moving;
         logf_("summons: cast skill %d (try %d, %d of %d wanted, mode %d)", sk, g_rs.ent_tries[e], alive[k], g_rs.ent_target[e], mode);
-        g_rs.phase = 1; g_rs.cast_t = now; g_rs.next = now + 40;
-    } else {                                                                 // did the pet count go up? if not within about a second, cast again
+        g_rs.phase = 1; g_rs.cast_t = now; g_rs.next = now + 15;    } else {                                                                 // did the pet count go up? if not within about a second, cast again
         sum_count_alive(g_srv_game, alive, 0);
-        if (alive[k] > g_rs.before) {                                        // got one (or several): the extra select makes the server run its mana top-up right after the cast
+        if (alive[k] > g_rs.before) {                                        // got one
+            g_sum_hold_until = 0;                                            // got one (or several): the extra select makes the server run its mana top-up right after the cast
             sum_select(g_rs.ent_id[e]); g_rs.ent_fail[e] = 0;
             if (alive[k] >= g_rs.ent_target[e]) g_rs.ei++;
-            g_rs.phase = 0; g_rs.next = now + 20;
+            g_rs.phase = 0; g_rs.next = now;
         } else if (now - g_rs.cast_t > 1000) {                               // nothing appeared: ignored, interrupted by her running, or the limit is reached
-            if (!g_rs.moved) g_rs.ent_fail[e]++;                             // only casts from a standstill count against the pet
+            g_sum_hold_until = 0;
+            if (!g_rs.moved) g_rs.ent_fail[e]++;                            // only casts from a standstill count against the pet
             if (g_rs.ent_fail[e] >= 3 || g_rs.ent_tries[e] >= g_rs.ent_target[e] + 8) g_rs.ei++;
-            g_rs.phase = 0; g_rs.next = now + 20;
-        } else g_rs.next = now + 30;
+            g_rs.phase = 0; g_rs.next = now;
+        } else g_rs.next = now + 10;
     }
 }
 static void sum_on_recv(const uint8_t *b, int len) { (void)b; (void)len; }
@@ -959,10 +991,10 @@ static void ww_extend_destination(DWORD unit) {
     static DWORD seed = 12345;
     seed = seed * 1103515245u + 12345u + GetTickCount();
     if (len < 1.0) { double a = (double)((seed >> 8) & 1023) * 6.2831853 / 1024.0; dx = cos(a); dy = sin(a); len = 1.0; }
-    double ang = ((double)((seed >> 16) % 81) - 40.0) * 3.14159265 / 180.0;                      // -40 .. +40 degrees
+    double ang = ((double)((seed >> 16) % 61) - 30.0) * 3.14159265 / 180.0;                      // -30 .. +30 degrees
     double ux = dx / len, uy = dy / len, c = cos(ang), sn = sin(ang);
     double vx = ux * c - uy * sn, vy = ux * sn + uy * c;
-    double reach = len + 7.0; if (reach < 10.0) reach = 10.0; if (reach > 15.0) reach = 15.0;    // through the enemy and about one tile past it, never far from the fight
+    double reach = len + 3.0; if (reach < 6.0) reach = 6.0; if (reach > 9.0) reach = 9.0;        // through the enemy and only a step past it (about 1-2 tiles total), never far from the fight
     int nx = px + (int)(vx * reach), ny = py + (int)(vy * reach);
     if (nx < 1 || ny < 1 || nx > 0xFFFE || ny > 0xFFFE) return;
     DWORD v = ((DWORD)ny << 16) | (DWORD)nx;
@@ -1031,6 +1063,29 @@ static int patch_merc_special(HMODULE g) {
         return 1;
     }
     logf_("merc whirlwind: the skill-start code was not found in D2Game (or appears more than once); not patched");
+    return 0;
+}
+// ---- wider hallways: mount qol.mpq (the re-edited Maggot Lair / Arcane Sanctuary map pieces) -----------------------------------------------
+// Storm's SFileOpenArchive (#266: name, priority, flags, &handle; ret 0x10) adds an archive to the same list the game's own MPQs live in; a higher
+// priority is searched first, so these map files override the stock ones. Loose Data\ files (with -direct) still win over every archive.
+static DWORD WINAPI maps_thread(LPVOID arg) {
+    (void)arg;
+    if (!g_wide_halls) return 0;
+    char path[MAX_PATH]; GetCurrentDirectoryA(MAX_PATH, path); lstrcatA(path, "\\qol.mpq");
+    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) { logf_("wide halls: %s not found; not loaded", path); return 0; }
+    for (int i = 0; i < 600; i++) {
+        HMODULE st = GetModuleHandleA("Storm.dll");
+        if (st) {
+            static const unsigned char s_arc[] = {0x8B, 0x4C, 0x24, 0x10, 0x81, 0xEC, 0x20, 0x01};   // #266 SFileOpenArchive
+            FARPROC f;
+            if (!storm_is(st, 266, s_arc, sizeof s_arc, &f)) { logf_("wide halls: Storm.dll not recognised; not loaded"); return 0; }
+            HANDLE h = NULL;
+            int ok = ((int(__stdcall *)(const char *, DWORD, DWORD, HANDLE *))f)(path, 9000, 0, &h);
+            logf_("wide halls: %s %s (Maggot Lair and Arcane Sanctuary map pieces)", path, ok ? "mounted" : "FAILED to open");
+            return 0;
+        }
+        Sleep(100);
+    }
     return 0;
 }
 static DWORD WINAPI special_thread(LPVOID arg) {
@@ -1268,6 +1323,7 @@ static DWORD WINAPI md_thread(LPVOID arg) {
 }
 #endif
 
+
 static DWORD WINAPI worker(LPVOID arg) {
     (void)arg;
     ap_config cfg;
@@ -1286,6 +1342,7 @@ static DWORD WINAPI worker(LPVOID arg) {
     CreateThread(NULL, 0, equip_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, summon_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, special_thread, NULL, 0, NULL);
+    CreateThread(NULL, 0, maps_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, patch_thread, NULL, 0, NULL);
     QueryPerformanceFrequency(&g_freq);
     logf_("qoltweaks loaded: enabled=%d range=%d rejuv_always=%d", cfg.enabled, cfg.range, cfg.rejuv_always);

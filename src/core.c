@@ -549,6 +549,7 @@ void ap_dump(char *buf, int n) {
 int ap_cursor_busy(void) { return cursor_id != 0; }
 uint32_t ap_cursor_id(void) { return cursor_id; }
 
+void ap_set_pos(int x, int y) { px = x; py = y; have_pos = 1; }
 int ap_player_pos(int *x, int *y) { if (!have_pos) return 0; if (x) *x = px; if (y) *y = py; return 1; }
 
 int ap_parse_skills(const char *txt, int len, ap_summon_t *out, int max) {

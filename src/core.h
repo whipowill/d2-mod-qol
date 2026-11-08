@@ -25,6 +25,7 @@ int ap_parse_monstats(const char *txt, int len, int *ids, int max);
 typedef struct { int id; char pet[16]; char mon[24]; int repeat; } ap_summon_t;      // mon = the pet's MonStats Id
 int ap_parse_skills(const char *txt, int len, ap_summon_t *out, int max);
 int ap_player_pos(int *x, int *y);
+void ap_set_pos(int x, int y);                         // the player's real current position (tiles), when the host can read it
 // Class ids of monsters by their MonStats `Id` name (explicit hcIdx column when the table has one, else the row number without "Expansion" divider rows).
 // out[i] = -1 when names[i] is not in the table. Returns how many were found, 0 if it isn't that table.
 int ap_monster_ids(const char *txt, int len, const char (*names)[24], int n, int *out);   // last known position of the player (0 = unknown)

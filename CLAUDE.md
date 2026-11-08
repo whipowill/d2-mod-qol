@@ -31,6 +31,7 @@ so there is no anti-cheat concern.
 | Rogue quivers (only with the matching weapon, see section 8) | `[mercenary] equip` | **[confirmed]** (user: "all perfect and working") |
 | drop a dismissed merc's gear | `[mercenary] drop_items` | **[confirmed]** works with several worn items |
 | ring/amulet/boots/gloves/belt on mercs | - | **removed** (no panel slots, see section 8) |
+| wider Maggot Lair / Arcane Sanctuary hallways | `[maps] wide_halls` | **[confirmed]** wider halls in game: `qol.mpq` mounted via Storm #266 (section 14) |
 | Act 5 merc Whirlwind | `[mercenary] whirlwind` | **[confirmed]** travels and carves through packs (section 12); visual still ~0.1 s |
 
 ---------------------------------------------------------------------------------------------------------------------------------
@@ -296,3 +297,22 @@ logging 9c/9d item packets in h_recv).
 ## 13. Housekeeping reminders (user side)
 Rename the repo folder to match if not done; replace old `autopilot`/`qolfixes` files in game folders; update `PlugY.ini` `DllToLoad` to `qol.dll`; the LoD game's `qol.ini` currently has `[mercenary] run=1 equip=1` (+ `drop_items`).
 BaseMod.ini in that folder has `FullEquip=0, RogueCrossBow=0, RogueAmaBow=0`.
+
+## 14. Wider hallways (`[maps] wide_halls`) - **[confirmed]** working in game (stock 1.13d accepts the v18 DS1s)
+- PD2 does this with data only: `pd2maps.mpq` holds 58 `Act2\Maggot\*.ds1` and 218 `Act2\Arcane\*.ds1` pieces re-saved with DS1edit (same `.tg1`/`.dt1` tilesets, same grid 11x11 Lair / 13x13 Arcane,
+  wall/orientation/floor cells moved, e.g. magEW walls rows 4-5 -> rows 4 and 6; DS1 version 18 vs stock 16). `LvlMaze.txt` rows for Lair/Arcane equal stock; no dt1/txt changes; no code involved.
+- `assets/maps/` holds those 276 files (extracted from PD2's `pd2maps.mpq`); `tools/make_mpq.py` packs a folder into an uncompressed MPQ v1 (encrypted hash/block tables, `(listfile)`); build.sh writes `build/qol.mpq` (tracked in git).
+- Runtime: `maps_thread` mounts `qol.mpq` (game folder = cwd) with Storm `SFileOpenArchive` #266 (`name, priority 9000, flags 0, &handle`, ret 0x10; sig `8B 4C 24 10 81 EC 20 01`). Loose `Data\` files with -direct still win. Default off.
+- Open questions: does stock 1.13d accept the v18 DS1s, do the pieces depend on other PD2 data (monster/object placement), are the halls actually wider in game.
+- Stock MPQ reading note: stock `(listfile)` uses PKWARE implode via compression mask 0x08, which `pd2-plugy-qol/Mods/tools/mpqx.py` lacks (add `if m == 0x08: return explode(d)` in `_dec`).
+
+## 15. Later changes (session notes)
+- **Summons restore** (section 11 is superseded on movement): the recast now waits until her animation mode is standing (1/5) for 150 ms, then casts; the player's walk/run requests are never held; start delay 300 ms,
+  loop gaps 0-15 ms, give-up after 120 s. Holding movement during casts (even briefly) felt like lag; "cast whatever she is doing" never spawned pets while moving.
+- **Pickup position**: the packet-derived position was only a walk DESTINATION while moving (or the last stop), so pickup failed when moving. `live_player_pos()` reads the real tile position from the client player unit
+  (D2Client 1.13d, pointer at +0x11D050, path word x at +2, y at +6) every frame and feeds `ap_set_pos()`. The address was found from disassembly (most-referenced client global), not verified in game.
+- **Whirlwind slide** tightened: destination = enemy distance + 3 units, clamped 6..9, angle +-30 degrees. Open request: let the merc start WW when minions block his path (needs the AI step that picks WW and checks range;
+  not found yet: tables 0x6fd2b81c/0x6fd2b724 are skill handlers, 0x6fd2ec60.. is an event table, not the AI; plan = trace build logging WW picks / blocked states).
+- `logging` now defaults to 0 (template, written default ini, and code fallback).
+- **Defaults changed (supersedes the "settings default to off" rule in section 1):** every feature switch now defaults to 1 (pickup, rejuv_always, clicker, run, equip, drop_items, whirlwind, keep_equipment,
+  no_level_penalty, wide_halls, summons) in the template ini, the written default ini and the code fallbacks. Only `logging` stays 0. Existing game-folder `qol.ini` files keep their own values.

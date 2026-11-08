@@ -12,6 +12,7 @@ local.conf
 build/*
 !build/qol.dll
 !build/qol.ini
+!build/qol.mpq
 
 # runtime logs / captures and editor junk
 *.log

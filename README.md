@@ -1,4 +1,4 @@
-# QOL DLL for Diablo 2
+# Will Scarlet's QOL for Diablo II
 
 A game mod for Diablo 2 introducing various quality-of-life features and bug fixes.
 
@@ -6,15 +6,16 @@ A game mod for Diablo 2 introducing various quality-of-life features and bug fix
 
 ## Features
 
-- **Auto Click** - hold spacebar to generate repeated left mouse clicks
+- **Auto Click** - hold spacebar to generate repeated left mouse clicks (works w/ PD2)
 - **Auto Pickup** - potions, scrolls, and keys hop into your belt and bags (works w/ PD2)
-- **Merc Run** - mercs run after you instead of walking (bug fix)
-- **Merc Equip** - mercs can now equip various item types consistent w/ their class (including quivers)
-- **Merc Drop** - mercs will now drop their gear if you hire a new one
 - **No XP Penalty** - no longer penalizes you for fighting low lvl monsters, or partying high level friends
 - **Death Keep** - no longer lose your gear when you die
-- **Merc Whirlwind** - mercs can use Whirlwind-style attacks properly and carve through packs (for mod authors giving mercs the skill)
+- **Merc Run** - mercs run when following you instead of walking (bug fix)
+- **Merc Equip** - mercs can equip various item types consistent w/ their class, including quivers
+- **Merc Drop** - mercs will drop their gear if you hire a new one
+- **Merc Whirlwind** - mercs can use Whirlwind-style attacks properly, if they have that skill
 - **Druid Summons** - leave with your wolves, bear, vines and ravens out and they're back, free, when you load in
+- **Wide Hallways** - Maggot Lair and Arcane Santuary now have wider hallways
 
 All of these features are optional and toggled in the ``qol.ini`` file.
 
@@ -25,3 +26,7 @@ Copy and paste the files from ``build/`` into your game folder, and add the ``qo
 ## License
 
 MIT, see `LICENSE`.
+
+## External Links
+
+- [Will Scarlet's QOL UI](https://github.com/whipowill/d2-mod-qol-ui) - another DLL mod that provides maphack, loot filter, and more
