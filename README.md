@@ -15,7 +15,7 @@ A mod for Diablo II introducing various quality-of-life features and bug fixes.
 - **Merc Drop** - mercs will drop their gear if you hire a new one
 - **Merc Whirlwind** - mercs can use Whirlwind-style attacks properly, if they have that skill
 - **Druid Summons** - the minions you had when you logged out will auto respawn
-- **Wide Hallways** - Maggot Lair and Arcane Santuary now have wider hallways
+- **Wide Hallways** - Maggot Lair and Arcane Sanctuary now have wider hallways
 - **CPU Fix** - fixes legacy CPU bug in the original game
 
 All of these features are optional and toggled in the ``qol.ini`` file.
