@@ -1,6 +1,6 @@
 # Will Scarlet's QOL for Diablo II
 
-A game mod for Diablo II introducing various quality-of-life features and bug fixes.
+A mod for Diablo II introducing various quality-of-life features and bug fixes.
 
 **Note this was designed for D2LOD v1.13 and will not work on version 1.14.**
 
@@ -30,4 +30,5 @@ MIT, see `LICENSE`.
 
 ## External Links
 
-- [Will Scarlet's QOL UI](https://github.com/whipowill/d2-mod-qol-ui) - another DLL mod that provides maphack, loot filter, and more
+- [Will Scarlet's PlugY Modpack](https://github.com/whipowill/d2-plugy-qol) - a compilation of all the best mods to play the game
+- [Will Scarlet's QOL UI Mod](https://github.com/whipowill/d2-mod-qol-ui) - another DLL mod that provides maphack, loot filter, and more
