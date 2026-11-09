@@ -1,4 +1,4 @@
-// core.c - potion auto-pickup logic. See CLAUDE.md for the protocol notes this is built on.
+// core.c - potion auto-pickup logic. See NOTES.md section 6 for the protocol notes this is built on.
 //
 // Packet facts (verified against real single-player captures (PD2; LoD 1.13c uses the same format)):
 //   server->client 0x9c / 0x9d : item action. 0x9c bit data starts at byte 8, 0x9d at byte 13 (owner header).
