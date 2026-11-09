@@ -16,8 +16,8 @@ so there is no anti-cheat concern.
 - The ini and docs should **not mention PD2**.
 - The user commits and pushes themselves. Don't commit unless asked.
 - Master switch `[qol] enabled`; per-feature `enabled` switches; `[qol] logging=0|1`.
-- Shipped names: `qol.dll`, `qol.ini`, `qol.log` (history: autopot -> autopilot -> qolfixes -> qoltweaks; some old files may still exist in game folders). Source `src/qoltweaks.c`;
-  `src/qoltweaks.ini` is the template build.sh copies to `build/qol.ini`. Repo folder is `d2-mod-qoltweaks` (was `pd2-mod-autopilot` / `pd2-mod-qolfixes`).
+- Shipped names: `qol.dll`, `qol.ini`, `qol.log`. Source `src/qoltweaks.c`;
+  `src/qoltweaks.ini` is the template build.sh copies to `build/qol.ini`.
 
 ### Feature status
 | feature | ini | status |
@@ -56,7 +56,7 @@ pip install --target .tools ziglang pefile capstone     # one-time; .tools/ is g
 - A fresh, untouched stock LoD install is the master original to disassemble.
 - The hex-edited DLLs the user made earlier (`D2Game_hexedits.dll`, `D2Game_snakeskeepequip.dll`) live in a separate folder next to the repo.
 - Loading: PlugY `DllToLoad=qol.dll` (user must update `PlugY.ini`), or D2GL `d2gl.json` -> `other.load_dlls_late` (separator `,`, e.g. `"SGD2FreeRes.dll,qol.dll"`; the PD2 launcher may rewrite it).
-- The DLL writes `qol.log` in the game dir (cwd). Old PD2 captures were kept as `autopot.stage*.log`.
+- The DLL writes `qol.log` in the game dir (cwd).
 
 
 ---------------------------------------------------------------------------------------------------------------------------------

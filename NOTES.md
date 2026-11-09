@@ -12,7 +12,7 @@ Addresses are RVAs unless a full `6fxxxxxx` virtual address is given. Items mark
 | D2Client | 0x6fab0000 | 1318970890 |
 | D2Common | 0x6fd50000 | 1318970339 |
 | Storm | 0x6fbf0000 | |
-- These are the **1.13d** files (BaseMod picks addresses by D2Client version; this D2Client matches its 0xd0040 = 1.13d case, 0xd003c = 1.13c). Older notes saying "1.13c" mean this build.
+- These are the **1.13d** files (BaseMod picks addresses by D2Client version; this D2Client matches its 0xd0040 = 1.13d case, 0xd003c = 1.13c).
 - PD2's own D2Game is a different 2010 build (ts 1268106930) but contains the same merc rule function; PD2's *extra* merc rules live in the 5 MB `ProjectDiablo.dll`, which we never reversed.
 - D2Common/Fog in the LoD folder are unmodified. `D2gfx.dll` there is the PlugY loader (calls PlugY.dll `_Init@4(0)` after the renderer loads, `_Release@4` on unload) - not recreated.
   `Patch_D2.mpq` is a rebuilt data package (182 files), not a code edit.
@@ -48,7 +48,7 @@ Used for: `Misc.txt` (stack maxima), `MonStats.txt` (hireling class ids), `ItemT
 Both reproduce edits the user made by hand to D2Game.dll (found by diffing the user's DLL variants against stock; all are D2Game ts 1318970639). Both are applied by `patch_thread` once D2Game is loaded (it loads when a game starts).
 
 ### 5a. No XP level penalty (`[experience] no_level_penalty=1`)
-- DLL variants: stock = PD2 root `D2Game.dll` (md5-prefix 3d27210f); `Backups/D2Game.dll` (814057c1) = stock + Snake's KeepEquip; the live LoD `D2Game.dll` (a12f2e7f, same file as the d2-plugy-qol repo) = that + the XP edit.
+- DLL variants: stock = PD2 root `D2Game.dll` (md5-prefix 3d27210f); `Backups/D2Game.dll` (814057c1) = stock + Snake's KeepEquip; the live LoD `D2Game.dll` (a12f2e7f) = that + the XP edit.
 - The edit: **one byte, 0x74 -> 0xEB at VA 6fca7ffa (file offset 0x87ffa)**. That is the `je` after `cmp eax,0x100` inside the level-difference XP scale function (VA **6fca7fc0**; scale tables at 6fd1a370 / 6fd1a39c;
   single caller is the kill-XP function at 6fca9370). `je full` -> `jmp full` returns full XP for every level gap, in BOTH directions: it fixes "a high level gets 0 from low monsters" and "a low level partied with a high level gets 0".
 - Runtime: `sig_find_xp_penalty` searches D2Game's image for the unique 20-byte pattern `3D 00 01 00 00 (74|EB) 0A B9 00 01 00 00 E9 ?? ?? ?? ?? 8B C2 C3`
@@ -241,7 +241,7 @@ logging 9c/9d item packets in h_recv).
 - Tools used to find this (no longer in the DLL): SetMode call-site and call-chain logging, path-record dumps. The mercdebug build (section 12 tools) is still available.
 
 ## 13. Housekeeping reminders (user side)
-Rename the repo folder to match if not done; replace old `autopilot`/`qolfixes` files in game folders; update `PlugY.ini` `DllToLoad` to `qol.dll`; the LoD game's `qol.ini` currently has `[mercenary] run=1 equip=1` (+ `drop_items`).
+`PlugY.ini` `DllToLoad` must name `qol.dll`; the LoD game's `qol.ini` currently has `[mercenary] run=1 equip=1` (+ `drop_items`).
 BaseMod.ini in that folder has `FullEquip=0, RogueCrossBow=0, RogueAmaBow=0`.
 
 ## 14. Wider hallways (`[maps] wide_halls`) - **[confirmed]** working in game (stock 1.13d accepts the v18 DS1s)
@@ -250,7 +250,7 @@ BaseMod.ini in that folder has `FullEquip=0, RogueCrossBow=0, RogueAmaBow=0`.
 - `assets/maps/` holds those 276 files (extracted from PD2's `pd2maps.mpq`); `tools/make_mpq.py` packs a folder into an uncompressed MPQ v1 (encrypted hash/block tables, `(listfile)`); build.sh writes `build/qol.mpq` (tracked in git).
 - Runtime: `maps_thread` mounts `qol.mpq` (game folder = cwd) with Storm `SFileOpenArchive` #266 (`name, priority 9000, flags 0, &handle`, ret 0x10; sig `8B 4C 24 10 81 EC 20 01`). Loose `Data\` files with -direct still win. Default off.
 - Open questions: does stock 1.13d accept the v18 DS1s, do the pieces depend on other PD2 data (monster/object placement), are the halls actually wider in game.
-- Stock MPQ reading note: stock `(listfile)` uses PKWARE implode via compression mask 0x08, which `pd2-plugy-qol/Mods/tools/mpqx.py` lacks (add `if m == 0x08: return explode(d)` in `_dec`).
+- Stock MPQ reading note: stock `(listfile)` uses PKWARE implode via compression mask 0x08, which a simple MPQ reader script will lack (add a PKWARE `explode` branch for mask 0x08 in its sector decompressor).
 
 ## 15. Later changes (session notes)
 - **Summons restore** (section 11 is superseded on movement): the recast now waits until her animation mode is standing (1/5) for 150 ms, then casts; the player's walk/run requests are never held; start delay 300 ms,
