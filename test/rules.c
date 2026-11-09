@@ -375,7 +375,7 @@ int main(void) {
     CHECK("no pickup while an item is on the cursor", tick() == 0);
     start("lbl"); BELT(0, 100, "hp1"); GROUND(84, 4, "hp1");
     { int a = tick(), b = tick(), d = tick(), e = tick();
-      CHECK("tries 3 times then stops", a == 84 && b == 84 && d == 84 && e == 0); }
+      CHECK("keeps retrying while in range (no give-up)", a == 84 && b == 84 && d == 84 && e == 84); }
     { uint8_t w[5] = {0x03, 0x12, 0x27, 0x10, 0x27}; ap_on_send(w, 5); }
     CHECK("retries after player moves closer", tick() == 84);
     BELT(1, 84, "hp1");

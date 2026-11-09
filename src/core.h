@@ -26,6 +26,7 @@ int ap_parse_monstats(const char *txt, int len, int *ids, int max);
 // bring a full set back (the `Param3` limit when the pet limit uses it, as with the wolves; otherwise 1). Returns how many, 0 if it isn't that table.
 typedef struct { int id; char pet[16]; char mon[24]; int repeat; } ap_summon_t;      // mon = the pet's MonStats Id
 int ap_parse_skills(const char *txt, int len, ap_summon_t *out, int max);
+int ap_due(uint32_t now);   // 1 = a pickup scan is due and something is on the ground (else skip ap_tick and live position reads)
 int ap_player_pos(int *x, int *y);
 void ap_set_town(int in_town);                        // 1 = the player is in a town: no auto-pickups
 void ap_set_pos(int x, int y);                         // the player's real current position (tiles), when the host can read it

@@ -23,9 +23,8 @@
 #define MAX_GROUND 64
 #define MAX_BELT 16
 #define MAX_KSTACK 8
-#define MAX_TRIES 3
 #define RETRY_MS 700
-#define TICK_MS 120
+#define TICK_MS 50
 
 typedef struct { uint32_t id; int x, y; int cls, kind, tier; char code[5]; int tries; uint32_t last_try; int try_dist; int qty; } ground_t;
 typedef struct { uint32_t id; int qty; int full; uint32_t hash; } kstack_t;   // a key stack in the inventory (qty -1 = unknown)
@@ -478,7 +477,11 @@ void ap_on_recv(const uint8_t *p, int len) {
 void ap_on_send(const uint8_t *p, int len) {
     if (len >= 5 && (p[0] == 0x20 || p[0] == 0x26)) {
         uint32_t id = u32(p + 1);
-        for (int k = 0; k < 2; k++) if (tome_id[k] && tome_id[k] == id && tome_full[k]) { tome_full[k] = 0; say("tome %d used: room again", k); }
+        for (int k = 0; k < 2; k++) if (tome_id[k] && tome_id[k] == id) {
+            // Using a scroll frees a slot, but the server doesn't re-announce the tome: our remembered count (possibly
+            // "at max") is stale, so forget it - otherwise a tome that looked full never accepts scrolls again.
+            tome_full[k] = 0; tome_qty[k] = -1; say("tome %d used: count unknown, room again", k);
+        }
     }
     if (len >= 5 && (p[0] == 0x01 || p[0] == 0x03)) { px = u16(p + 1); py = u16(p + 3); have_pos = 1; }
 }
@@ -512,13 +515,22 @@ static int wanted(const ground_t *g) {
     return tome_has_room(g->kind);
 }
 
+// Cheap test for the host: is a scan due at all? False while nothing is on the ground (the common case), so the host
+// can skip reading the player's live position and the scan itself.
+int ap_due(uint32_t now) {
+    if (!cfg.enabled || now - last_tick < (uint32_t)(cfg.poll_ms > 0 ? (cfg.poll_ms < 20 ? 20 : cfg.poll_ms > 2000 ? 2000 : cfg.poll_ms) : TICK_MS)) return 0;
+    for (int i = 0; i < MAX_GROUND; i++) if (ground[i].id) return 1;
+    return 0;
+}
+
 int ap_tick(uint32_t now, uint8_t out[16]) {
     now_ms = now;
     if (!cfg.enabled || !have_pos || in_town || now - last_tick < (uint32_t)(cfg.poll_ms > 0 ? (cfg.poll_ms < 20 ? 20 : cfg.poll_ms > 2000 ? 2000 : cfg.poll_ms) : TICK_MS)) return 0;
     last_tick = now;
     // A cursor item we never saw leave would block every pickup for the rest of the game: expire it.
     if (cursor_id && now - cursor_t > 20000) { say("cursor item %u unchanged for 20 s: assuming it is gone", cursor_id); cursor_id = 0; }
-    if (cursor_id || now - last_pick < 250) return 0;       // never risk putting something on the cursor
+    if (cursor_id) return 0;                                 // never risk putting something on the cursor
+    int cooling = now - last_pick < 250;                     // gold can't land on the cursor, so it ignores the cooldown
 
     int best = -1, bestd = 1 << 30;
     for (int i = 0; i < MAX_GROUND; i++) {
@@ -526,9 +538,10 @@ int ap_tick(uint32_t now, uint8_t out[16]) {
         if (!g->id) continue;
         int dx = abs(g->x - px), dy = abs(g->y - py), d = dx > dy ? dx : dy;
         if (d > cfg.range) continue;
+        if (cooling && g->cls != 4) continue;
         if (!wanted(g)) continue;
         if (g->tries && d < g->try_dist - 1) g->tries = 0;   // player got closer since the last attempt: try again
-        if (g->tries >= MAX_TRIES || (g->tries && now - g->last_try < RETRY_MS)) continue;
+        if (g->tries && now - g->last_try < RETRY_MS) continue;   // no give-up: keep retrying every RETRY_MS while in range
         if (d < bestd) { bestd = d; best = i; }
     }
     if (best < 0) return 0;

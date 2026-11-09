@@ -252,11 +252,15 @@ static int __stdcall h_recv(void *buf, int cap) {
         if (g_summons) sum_on_recv((const uint8_t *)buf, r);
     }
     misc_tick();
-    if (g_summons) sum_step(GetTickCount());
-    if (g_dm_active_flag) dm_step(GetTickCount());
-    live_player_pos();
+    DWORD now = GetTickCount();
+    if (g_summons) sum_step(now);
+    if (g_dm_active_flag) dm_step(now);
+    // The live position read walks several game structures; only do it when summons need it every packet, or when a
+    // pickup scan is actually due (something lies on the ground).
+    int due = !g_dm_active_flag && ap_due(now);
+    if (g_summons || due) live_player_pos();
     uint8_t out[16];
-    int n = g_dm_active_flag ? 0 : ap_tick(GetTickCount(), out);
+    int n = due ? ap_tick(now, out) : 0;
     if (n > 0 && g_arg >= 0) {                           // only once we know how the game calls SendPacket
         g_injecting = 1;
         int sr = o_send(n, g_arg, out);
