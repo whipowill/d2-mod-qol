@@ -222,6 +222,16 @@ static void live_player_pos(void) {
     ap_set_town(town);
     if (lvl != last_lvl) { last_lvl = lvl; logf_("area: level %d%s", lvl, town ? " (town: auto-pickups off)" : ""); }
 }
+// The unit id of the player THIS client controls (client player unit, D2Client +0x11D050, unit id at +0xC); 0 = not known yet. The server unit of the same
+// player has the same id. In a game with other players the server thread sees every player's packets, so anything keyed on "the player" must check this.
+static DWORD local_player_id(void) {
+    HMODULE cl = GetModuleHandleA("D2Client.dll"); if (!cl) return 0;
+    DWORD *pp = (DWORD *)((BYTE *)cl + 0x11D050);
+    if (!readable(pp, 4)) return 0;
+    DWORD u = *pp;
+    if (!u || !readable((const void *)u, 0x30) || *(DWORD *)u != 0) return 0;
+    return *(DWORD *)(u + 0xC);
+}
 static int __stdcall h_send(int size, int arg, void *pkt) {
     if (g_summons && !g_injecting && size > 0 && size <= 16 && readable(pkt, size)) {
         sum_on_send(pkt, size);
@@ -851,6 +861,8 @@ static void __cdecl qt_srv_tick(DWORD game, DWORD player) {
     static DWORD last_player, next;
     if (player != last_player) {                                              // a new game: note who is playing
         if (!readable((const void *)player, 0x20) || *(DWORD *)player != 0) return;
+        DWORD me = local_player_id();                                         // another player's packets (a Druid joining, say) must not replace "the player": only our own unit counts
+        if (!me || *(DWORD *)(player + 0xC) != me) return;
         last_player = player; g_srv_player = player; g_srv_game = game;
         DWORD pd = *(DWORD *)(player + 0x14);
         memset(g_char, 0, sizeof g_char);
