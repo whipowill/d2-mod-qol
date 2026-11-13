@@ -189,7 +189,7 @@ separate requests. The client received a ground item it never saw leave the merc
 ---------------------------------------------------------------------------------------------------------------------------------
 ## 10. Config reference, diagnostics, techniques
 ### Config (src/qoltweaks.ini -> build/qol.ini; pickup and clicker default ON in the template, the merc/death/experience options default OFF)
-`[qol] enabled, logging` - `[pickup] enabled, range (default 4), rejuv_always` - `[mercenary] run, equip, drop_items` - `[death] keep_equipment` - `[experience] no_level_penalty` - `[clicker] enabled, key (VK, 32), hold_delay_ms (200), interval_ms (100)`.
+`[qol] enabled, logging` - `[pickup] enabled, range (default 4), rejuv_always, pickup_in_town (0)` - `[mercenary] run, equip, drop_items` - `[death] keep_equipment` - `[experience] no_level_penalty` - `[clicker] enabled, key (VK, 32), hold_delay_ms (200), interval_ms (100)`.
 Changes apply at next game launch. `logging=0` removes the log file, the profiling timers, and the core log callback. The ini template is CRLF. Removed options (do not bring back): `keys`, `key_stack_max`, `belt_slots`, `hooks`, `packets`,
 `verbose`, `pd2_equip`.
 

@@ -24,6 +24,7 @@ static int g_logging = 0;        // ini: [qol] logging=0 turns off the log file,
 static volatile LONG g_lines;
 #define MAX_LINES 20000
 
+static int g_pickup_in_town;                 // [pickup] pickup_in_town: 1 = auto-pickups also work in town
 static void logf_(const char *fmt, ...) {
     if (!g_log || InterlockedIncrement(&g_lines) > MAX_LINES) return;
     va_list ap; va_start(ap, fmt);
@@ -219,8 +220,8 @@ static void live_player_pos(void) {
     DWORD lv = r2 && readable((const void *)(r2 + 0x58), 4) ? *(DWORD *)(r2 + 0x58) : 0;
     if (lv && readable((const void *)(lv + 0x1d0), 4)) lvl = (int)*(DWORD *)(lv + 0x1d0);
     if (lvl == 1 || lvl == 40 || lvl == 75 || lvl == 103 || lvl == 109) town = 1;
-    ap_set_town(town);
-    if (lvl != last_lvl) { last_lvl = lvl; logf_("area: level %d%s", lvl, town ? " (town: auto-pickups off)" : ""); }
+    ap_set_town(town && !g_pickup_in_town);
+    if (lvl != last_lvl) { last_lvl = lvl; logf_("area: level %d%s", lvl, town && !g_pickup_in_town ? " (town: auto-pickups off)" : ""); }
 }
 // The unit id of the player THIS client controls (client player unit, D2Client +0x11D050, unit id at +0xC); 0 = not known yet. The server unit of the same
 // player has the same id. In a game with other players the server thread sees every player's packets, so anything keyed on "the player" must check this.
@@ -352,6 +353,8 @@ static void load_config(ap_config *c) {
                   "rejuv_always=1\r\n"
                   "; 1 = also pick up gold piles within range\r\n"
                   "gold=1\r\n"
+                  "; 1 = also pick things up while standing in town (0 = no pickups in town)\r\n"
+                  "pickup_in_town=0\r\n"
                   "\r\n"
                   "[death]\r\n"
                   "; 1 = keep your equipment when you die (the \"KeepEquip\" hex edit by SnakeByteStudios, applied in memory). Single player.\r\n"
@@ -413,6 +416,7 @@ static void load_config(ap_config *c) {
     c->range = GetPrivateProfileIntA("pickup", "range", 4, path);
     c->rejuv_always = GetPrivateProfileIntA("pickup", "rejuv_always", 1, path);
     c->gold = GetPrivateProfileIntA("pickup", "gold", 1, path);
+    g_pickup_in_town = GetPrivateProfileIntA("pickup", "pickup_in_town", 0, path);
     c->poll_ms = GetPrivateProfileIntA("pickup", "poll_ms", 120, path);
     g_logging = GetPrivateProfileIntA("qol", "logging", 0, path);
     c->verbose = g_logging ? 1 : 0;
