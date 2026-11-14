@@ -16,6 +16,7 @@
 
 static FILE *g_log;
 static int g_merc_special = 0;                                   // ini: [mercenary] whirlwind
+static int g_respec = 0;                                         // ini: [respec] enabled
 static int g_summons = 0;                                        // ini: [summons] enabled
 static int g_merc_drop = 0;                                      // ini: [mercenary] drop_items
 static int g_merc_equip = 0;                                    // ini: [mercenary] equip
@@ -233,6 +234,21 @@ static DWORD local_player_id(void) {
     if (!u || !readable((const void *)u, 0x30) || *(DWORD *)u != 0) return 0;
     return *(DWORD *)(u + 0xC);
 }
+// -- chat commands: .reset stats / .reset skills (also with a leading '/') --
+// The command is read on the SERVER side, from the chat packet of ANY player in the game (the server runs in the process that hosts the game: a bot that
+// joined a TCP/IP game has no server of its own, so a client-side flag could never be acted on, 2026-11-13). Returns 1 (stats), 2 (skills) or 0.
+static int respec_parse(const unsigned char *b, int size) {                  // client->server chat line: 15 <type> <?> text 00 ...
+    for (int off = 1; off <= 4 && off < size; off++) {
+        if (b[off] != '.' && b[off] != '/') continue;
+        char t[16]; int n = 0;
+        for (int i = off + 1; i < size && n < 15 && b[i]; i++) t[n++] = (char)((b[i] >= 'A' && b[i] <= 'Z') ? b[i] + 32 : b[i]);
+        t[n] = 0;
+        if (!strcmp(t, "reset stats")) return 1;
+        if (!strcmp(t, "reset skills")) return 2;
+        return 0;
+    }
+    return 0;
+}
 static int __stdcall h_send(int size, int arg, void *pkt) {
     if (g_summons && !g_injecting && size > 0 && size <= 16 && readable(pkt, size)) {
         sum_on_send(pkt, size);
@@ -405,6 +421,7 @@ static void load_config(ap_config *c) {
     g_merc_run = master && GetPrivateProfileIntA("mercenary", "run", 1, path);
     g_merc_equip = master && GetPrivateProfileIntA("mercenary", "equip", 1, path);
     g_merc_drop = master && GetPrivateProfileIntA("mercenary", "drop_items", 1, path);
+    g_respec = master && GetPrivateProfileIntA("respec", "enabled", 1, path);
     g_summons = master && GetPrivateProfileIntA("summons", "enabled", 1, path);
     g_wide_halls = master && GetPrivateProfileIntA("maps", "wide_halls", 1, path);
     g_cpu_fix = master && GetPrivateProfileIntA("cpu", "fix", 1, path);
@@ -861,8 +878,82 @@ static void sum_count_alive(DWORD game, int *alive, int on_server_thread) {     
         }
     }
 }
-static void __cdecl qt_srv_tick(DWORD game, DWORD player) {
+// -- server side reset (logic and 1.13d addresses from PlugY's StatsPoints.cpp / SkillsPoints.cpp) --
+typedef int (__stdcall *fn_stat3)(DWORD, DWORD, DWORD);
+typedef void (__stdcall *fn_addstat)(DWORD, DWORD, int, DWORD);
+typedef DWORD (__stdcall *fn_sklvl)(DWORD, DWORD, DWORD);
+typedef DWORD (__stdcall *fn_skcost)(DWORD, int, DWORD, DWORD);
+typedef void (__stdcall *fn_setsk)(DWORD, DWORD, DWORD, DWORD, const char *, DWORD);
+// Both game functions below use a private register convention in 1.13d (PlugY calls them "by EAX,ESI,EBX"; confirmed by disassembly of the crash):
+static BYTE *call_charbin(void *fn, DWORD cls) {                              // D2Common +0x17B0: eax = class id, returns the charstats row
+    BYTE *r; __asm__ volatile("call *%1" : "=a"(r) : "r"(fn), "0"(cls) : "ecx", "edx", "memory", "cc"); return r;
+}
+static void call_skclient(void *fn, DWORD client, DWORD unit, DWORD id, DWORD rem) {   // level is always 0 here
+    DWORD f = (DWORD)fn, r = rem, c = client;                                             // ecx / edx are clobbered by the callee, so they carry the inputs
+    __asm__ volatile("pushl %%edx\n\tpushl $0\n\tcall *%%ecx" : "+c"(f), "+d"(r), "+a"(c) : "S"(unit), "b"(id) : "memory", "cc");
+}
+static void respec_stats(DWORD u, HMODULE c) {
+    fn_stat3 base = (fn_stat3)GetProcAddress(c, (LPCSTR)10216);               // D2GetPlayerBaseStat
+    fn_addstat add = (fn_addstat)GetProcAddress(c, (LPCSTR)10645);            // D2AddPlayerStat
+    BYTE *cs = call_charbin((BYTE *)c + 0x17B0, *(DWORD *)(u + 4));         // charstats row of the class
+    if (!base || !add || !cs || !readable(cs, 0x50)) { logf_("respec: stats: functions not available"); return; }
+    static const int stat_id[4] = {0, 2, 1, 3}, bin_off[4] = {0x30, 0x31, 0x32, 0x33};   // str, dex, ene, vit
+    int total = 0;
+    for (int k = 0; k < 4; k++) {
+        int cur = base(u, stat_id[k], 0), rem = cur - cs[bin_off[k]];
+        if (rem <= 0) continue;
+        if (cur - rem < 1) rem = cur - 1;
+        if (rem <= 0) continue;
+        add(u, stat_id[k], -rem, 0);
+        if (stat_id[k] == 3) { add(u, 7, -rem * (cs[0x46] << 6), 0); add(u, 11, -rem * (cs[0x47] << 6), 0); }   // vitality: max life + max stamina
+        if (stat_id[k] == 1) add(u, 9, -rem * (cs[0x48] << 6), 0);                                              // energy: max mana
+        total += rem;
+    }
+    if (total) add(u, 4, total, 0);
+    logf_("respec: stats reset, %d points returned", total);
+}
+static void respec_skills(DWORD u, HMODULE c, HMODULE g) {
+    fn_stat3 getstat = (fn_stat3)GetProcAddress(c, (LPCSTR)10550);           // D2GetPlayerStat
+    fn_addstat add = (fn_addstat)GetProcAddress(c, (LPCSTR)10645);
+    fn_sklvl sklvl = (fn_sklvl)GetProcAddress(c, (LPCSTR)10007);              // D2GetSkillLevel
+    fn_skcost skcost = (fn_skcost)GetProcAddress(c, (LPCSTR)11081);           // D2GetSkillCost
+    fn_setsk setsk = (fn_setsk)GetProcAddress(c, (LPCSTR)10335);              // D2SetSkillBaseLevel
+    void *onclient = (BYTE *)g + 0xDD4F0;                                    // D2SetSkillBaseLevelOnClient (tells the client)
+    DWORD pd = *(DWORD *)(u + 0x14), skills = *(DWORD *)(u + 0xA8);
+    if (!getstat || !add || !sklvl || !skcost || !setsk || !readable((void *)pd, 0xA0) || !readable((void *)skills, 8)) { logf_("respec: skills: functions not available"); return; }
+    DWORD client = *(DWORD *)(pd + 0x9C), cls = *(DWORD *)(u + 4);
+    int total = 0;
+    for (DWORD sk = *(DWORD *)(skills + 4); sk && readable((void *)sk, 0x40);) {
+        DWORD next = *(DWORD *)(sk + 4), bin = *(DWORD *)sk;
+        if (readable((void *)bin, 0x180) && *(BYTE *)(bin + 0xC) == cls && *(int *)(sk + 0x34) == -1) {
+            DWORD id = *(WORD *)bin;
+            DWORD keep = !getstat(u, 107, id);                                // keep the entry when gear gives +skill levels to it (stat 107 = item_singleskill)
+            DWORD lvl = sklvl(u, sk, 0);
+            int skpoints = *(int *)(bin + 0x170);
+            if (skpoints == -1) { setsk(u, id, 0, keep, "qol", 0); total += (int)lvl; }
+            else while (lvl--) { setsk(u, id, lvl, keep, "qol", 0); total += (int)skcost(u, skpoints, id, lvl); }
+            call_skclient(onclient, client, u, id, keep);
+        }
+        sk = next;
+    }
+    if (total) add(u, 5, total, 0);
+    logf_("respec: skills reset, %d points returned", total);
+}
+static void respec_run(DWORD player, int req) {
+    HMODULE c = GetModuleHandleA("D2Common.dll"), g = GetModuleHandleA("D2Game.dll");
+    if (!c || !g || !readable((void *)player, 0xB0)) return;
+    if (req & 1) respec_stats(player, c);
+    if (req & 2) respec_skills(player, c, g);
+}
+static void __cdecl qt_srv_tick(DWORD game, DWORD player, DWORD id, const unsigned char *buf, DWORD size) {
     static DWORD last_player, next;
+    if (g_respec && id == 0x15 && size > 4 && size < 64 && readable(buf, size) && readable((const void *)player, 0xB0) && *(DWORD *)player == 0) {   // a chat line from ANY player: only a player unit resets itself
+        int req = respec_parse(buf, (int)size);
+        if (req) {
+            logf_("respec: %s requested by a player in the game", req == 1 ? "stats" : "skills");
+            respec_run(player, req);
+        }
+    }
     if (player != last_player) {                                              // a new game: note who is playing
         if (!readable((const void *)player, 0x20) || *(DWORD *)player != 0) return;
         DWORD me = local_player_id();                                         // another player's packets (a Druid joining, say) must not replace "the player": only our own unit counts
@@ -913,9 +1004,14 @@ static int patch_summon_hook(HMODULE g) {
     BYTE *st = stub_alloc();
     if (!st) return 0;
     BYTE *p = st;
-    *p++ = 0x60; *p++ = 0x52; *p++ = 0x51;                                    // pushad; push edx (player); push ecx (game)
-    p = emit_rel(p, 0xE8, (DWORD)qt_srv_tick);
-    *p++ = 0x83; *p++ = 0xC4; *p++ = 0x08; *p++ = 0x61;                       // add esp,8; popad
+    // at the call site: ecx = game, edx = player, edi = packet id, and the handler's two stack arguments (buffer, size) sit above the return address
+    *p++ = 0x60;                                                              // pushad (buffer is now at [esp+0x24], size at [esp+0x28], the packet id (edi) at [esp])
+    *p++ = 0xFF; *p++ = 0x74; *p++ = 0x24; *p++ = 0x28;                       // push dword [esp+0x28]   (size)
+    *p++ = 0xFF; *p++ = 0x74; *p++ = 0x24; *p++ = 0x28;                       // push dword [esp+0x28]   (buffer: the first push moved esp by 4)
+    *p++ = 0xFF; *p++ = 0x74; *p++ = 0x24; *p++ = 0x08;                       // push dword [esp+0x08]   (the packet id: edi as pushad saved it)
+    *p++ = 0x52; *p++ = 0x51;                                                 // push edx (player); push ecx (game)
+    p = emit_rel(p, 0xE8, (DWORD)qt_srv_tick);                                // qt_srv_tick(game, player, id, buffer, size), cdecl
+    *p++ = 0x83; *p++ = 0xC4; *p++ = 0x14; *p++ = 0x61;                       // add esp,20; popad
     *p++ = 0xFF; *p++ = 0x24; *p++ = 0xFD; *(DWORD *)p = table; p += 4;       // jmp [edi*8 + table]  (the handler the game was about to call)
     BYTE patch[7]; patch[0] = 0xE8; *(DWORD *)(patch + 1) = (DWORD)st - (DWORD)(site + 5); patch[5] = patch[6] = 0x90;
     patch_bytes(site, patch, 7);
@@ -924,7 +1020,7 @@ static int patch_summon_hook(HMODULE g) {
 }
 static DWORD WINAPI summon_thread(LPVOID arg) {
     (void)arg;
-    if (!g_summons) return 0;
+    if (!g_summons && !g_respec) return 0;
     for (int i = 0; i < 6000; i++) {
         HMODULE g = GetModuleHandleA("D2Game.dll");
         if (g) {
