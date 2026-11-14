@@ -8,6 +8,7 @@ A mod for Diablo II introducing various quality-of-life features and bug fixes.
 
 - **Auto Click** - hold spacebar to generate repeated left mouse clicks (works w/ PD2)
 - **Auto Pickup** - potions, scrolls, keys, and (optionally) gold (works w/ PD2)
+- **Free Respec** - reset your stats or your skills on demand
 - **No XP Penalty** - no longer penalized for fighting low lvl monsters, or partying high level friends
 - **Death Keep** - no longer lose your gear when you die
 - **Merc Run** - mercs run when following you instead of walking (bug fix)
@@ -19,6 +20,11 @@ A mod for Diablo II introducing various quality-of-life features and bug fixes.
 - **CPU Fix** - fixes legacy CPU bug in the original game
 
 All of these features are optional and toggled in the ``qol.ini`` file.
+
+## Commands
+
+- ``.reset skills`` - reset your skills
+- ``.reset stats`` - reset your stats
 
 ## Install
 
