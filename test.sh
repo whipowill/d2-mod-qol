@@ -36,5 +36,10 @@ MKO=8bc7f7d81bc02508e0ffff68010c000005013c00005389445c   # the path collision-ma
 .out/sigtest mask-patched ${MKO/05013c0000/e9aabbccdd}
 .out/sigtest mask-none $RECV
 .out/sigtest mask-none ${MKO}${MKO}
+FEO=8a456d84c075118bc69983e20303c2c1f802f7d803f0eb2b3c017516b855555555f7ee2bd6d1fa8bc2c1e81f03c203f0eb113c02750d8bc69983e20703c2c1f8038bf081fe00001000   # Fire Enchanted per-difficulty scale (stock D2Game 1.13d 6fcef411)
+.out/sigtest fe-orig $FEO
+.out/sigtest fe-patched ${FEO/b855555555f7ee2bd6d1fa8bc2c1e81f03c203f0/8bc69983e20303c2c1f8028bf090909090909090}
+.out/sigtest fe-none $RECV
+.out/sigtest fe-none ${FEO}${FEO}                                                  # two matches = ambiguous = refuse
 gcc -O1 -Wall -Wextra -Isrc -o .out/replay test/replay.c src/core.c
 [ -n "${1:-}" ] && .out/replay "$1" 4 1 | grep -E "WOULD|PICKUP|end:|equipped"

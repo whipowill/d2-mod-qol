@@ -285,3 +285,26 @@ BaseMod.ini in that folder has `FullEquip=0, RogueCrossBow=0, RogueAmaBow=0`.
 - Client: nothing is hooked for this any more (`h_send` no longer looks at chat; `g_respec_req` is gone). We do not patch PlugY's chat call site (D2Client B1FD6) because PlugY patches the same bytes.
 - Logic and 1.13d addresses are from PlugY (StatsPoints.cpp / SkillsPoints.cpp): D2Common ordinals AddPlayerStat 10645, GetPlayerBaseStat 10216, GetPlayerStat 10550, SetSkillBaseLevel 10335, GetSkillLevel 10007, GetSkillCost 11081, D2GetCharStatsBIN D2Common+0x17B0 (fastcall), D2Game+0xDD4F0 SetSkillBaseLevelOnClient (fastcall). Not re-verified by disassembly. Log lines: `respec: ...`.
 - Stats: each of str/dex/ene/vit goes back to the class base from charstats, minus the max life/stamina/mana the points gave; returned to stat 4. Skills: every class skill to level 0 (keeps entries with +skill gear), points to stat 5.
+
+---------------------------------------------------------------------------------------------------------------------------------
+## 18. Fire Enchanted Nightmare fix (`[monsters] fire_enchanted_fix`) - built 2026-11-14, awaiting in-game test
+- The FE death explosion is umod 9's death handler **D2Game 6fcef300** (only reference: the umod event table at 6fd2e670, 6 dwords per umod, umod 9 slot 2 = 6fd2e750; nothing else calls it).
+  It creates missile 0x75 `monstercorpseexplode` and computes damage itself (Missiles.txt `fireexplode`/`monstercorpseexplode` have no damage columns).
+- Damage = MaxHP from D2Common #10997 (MonStats HP x MonLvl HP/L-HP % at the monster's level stat 12, args monId, bExpansion, difficulty, level, flags=1, out; player count NOT included)
+  x DifficultyLevels `MonsterCEDamagePercent` (record +0x3c, getter D2Common #10694; only reader in D2Game is 6fcef3fe; stock 50/35/20)
+  x hard-coded factor by `[game+6Dh]`: Normal x3/4, **Nightmare x2/3**, Hell x1/8. About 60% of the result becomes fire damage and the rest physical (6fcef454..6fcef4fd).
+- Why it is a bug: as % of MonStats HP (L-HP x CE% x factor), Normal lvl 30 = 50%, NM lvl 30/40/50/60 = 75/154/234/314%, Hell lvl 70/80/90 = 111/140/169%. Late Nightmare explodes ~2x Hell.
+  (Keep threads: d2mods.info p=495155 points at MonsterCEDamagePercent; nobody documents the per-difficulty factor.)
+- Fix: `sig_find_fe_nightmare` (28-byte head + 20-byte block + 25-byte tail, exactly once, stock VA 6fcef411, block at 6fcef42d) replaces the NM block (`mov eax,55555555h ; imul esi ; ... add esi,eax`) with
+  `mov eax,esi ; cdq ; and edx,3 ; add eax,edx ; sar eax,2 ; mov esi,eax` + 7 nops (x1/4); the original `jmp 6fcef454` at 6fcef441 is kept. NM becomes 28/58/88/118% for lvl 30-60.
+  Default ON (user's choice). Log: `fire enchanted fix: patched D2Game +...`.
+
+---------------------------------------------------------------------------------------------------------------------------------
+## 19. Hire-screen descriptions (data only) - the 9-slot limit
+- Hire screen (D2Client 6fb2bff3 area) fills a merc-info struct via D2Common #11167 (copies Hireling.bin byte +0xD2 = HireDesc index to +0x30), then calls D2Common **#10099** (6fd864b0) to get the text:
+  `cmp ecx,9 ; jae none ; mov cx,[ecx*2+6fde6de4]` -> D2Lang string by id. Only indices 0..8 have text; the HireDesc.txt *Description*/code strings are never displayed.
+- Fixed ids (slot: code -> id key): 1 farw 3371 strhirespecial1, 2 carw 3372 strhirespecial2, 3 comb 11090 PalMercEXST4X, 4 def 11088 PalMercExST1X, 5 off 11089 PalMercEXST3X,
+  6 fire 3377 strhirespecial7, 7 cold 3376 strhirespecial6, 8 ltng 3375 strhirespecial5. Stock HireDesc.txt also has 9 bswr, 10 baxe: no text without a code change.
+- **The user does NOT want qol.dll to extend this table** (2026-11-14: a 9 -> 11 slot patch was built without asking and removed). Fit mercs into the 9 slots with data edits instead.
+- The text lives in a loose `Data\local\lng\eng\string.tbl` (copy of d2data.mpq's, ids 3371-3377 edited) and `patchstring.tbl` (1088-1090). .tbl files carry a CRC16 that D2Lang verifies on load
+  (CRC-16 init FFFF, table at D2Lang 6fc10030, over [dataStart, fileEnd)); a wrong CRC = "Unrecoverable internal error" at D2Lang +0x996b.

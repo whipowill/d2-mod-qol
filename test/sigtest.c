@@ -45,6 +45,13 @@ int main(int argc, char **argv) {
         int ok = !strcmp(argv[1], "xp-orig") ? (at >= 0 && !patched) : !strcmp(argv[1], "xp-patched") ? (at >= 0 && patched == 1) : at < 0;
         printf("%s %s (offset %ld)\n", argv[1], ok ? "ok" : "FAIL", at); return !ok;
     }
+    if (!strncmp(argv[1], "fe", 2)) {          // fe-orig / fe-patched / fe-none : sig_find_fe_nightmare on a buffer
+        unsigned char big[256] = {0}; size_t n = strlen(argv[2]) / 2 < sizeof big ? strlen(argv[2]) / 2 : sizeof big;
+        for (size_t i = 0; i < n; i++) { unsigned v; sscanf(argv[2] + 2 * i, "%2x", &v); big[i] = (unsigned char)v; }
+        int patched = -1; long at = sig_find_fe_nightmare(big, n, &patched);
+        int ok = !strcmp(argv[1], "fe-orig") ? (at == 28 && !patched) : !strcmp(argv[1], "fe-patched") ? (at == 28 && patched == 1) : at < 0;
+        printf("%s %s (offset %ld)\n", argv[1], ok ? "ok" : "FAIL", at); return !ok;
+    }
     int s = sig_is_send(b), r = sig_is_recv(b), m = sig_is_setmode(b);
     if (!strcmp(argv[1], "setmode")) { printf("setmode %s\n", m ? "ok" : "FAIL"); return !m; }
     if (!strcmp(argv[1], "notsetmode")) { printf("notsetmode %s\n", !m ? "ok" : "FAIL"); return m; }

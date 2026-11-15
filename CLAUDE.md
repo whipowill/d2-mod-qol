@@ -33,6 +33,7 @@ so there is no anti-cheat concern.
 | ring/amulet/boots/gloves/belt on mercs | - | **removed** (no panel slots, see section 8) |
 | wider Maggot Lair / Arcane Sanctuary hallways | `[maps] wide_halls` | **[confirmed]** wider halls in game: `qol.mpq` mounted via Storm #266 (section 14) |
 | Act 5 merc Whirlwind | `[mercenary] whirlwind` | **[confirmed]** travels and carves through packs (section 12); visual still ~0.1 s |
+| Fire Enchanted Nightmare explosion fix (in-memory, NM x2/3 -> x1/4) | `[monsters] fire_enchanted_fix` | built, default on, awaiting in-game test (section 18) |
 
 ---------------------------------------------------------------------------------------------------------------------------------
 ## 2. Build, test, install
@@ -75,5 +76,8 @@ pip install --target .tools ziglang pefile capstone     # one-time; .tools/ is g
 - NOTES.md section 14: Wider hallways (`[maps] wide_halls`) - working in game (stock 1.13d accepts the v18 DS1s)
 - NOTES.md section 15: Later changes (session notes)
 - NOTES.md section 16: CPU fix (`[cpu] fix`, `throttle_render`)
+- NOTES.md section 17: Chat reset commands (`[respec] enabled`)
+- NOTES.md section 18: Fire Enchanted Nightmare fix (`[monsters] fire_enchanted_fix`)
+- NOTES.md section 19: Hire-screen descriptions (data only; the 9-slot limit and the fixed string ids)
 
 Cross-references such as "section 8" or "section 9" anywhere in these notes mean the same-numbered section of NOTES.md (sections 1 and 2 are this file). Section 4 also holds the Storm file-access and table-id lessons; section 10 the config reference and debugging techniques.

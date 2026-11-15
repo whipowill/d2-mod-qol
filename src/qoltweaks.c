@@ -338,6 +338,7 @@ static int hook_import_ordinal(HMODULE mod, const char *dll, unsigned ord, void 
 
 static int g_keep_equip = 0;                                    // ini: [death] keep_equipment
 static int g_xp_nopenalty = 0;                                  // ini: [experience] no_level_penalty
+static int g_fe_fix = 0;                                        // ini: [monsters] fire_enchanted_fix
 static int g_wide_halls = 0;                                    // ini: [maps] wide_halls
 static int g_cpu_fix = 0, g_cpu_throttle = 0;                    // ini: [cpu] fix, throttle_render
 static int g_merc_run = 0;                                      // ini: [mercenary] run
@@ -382,6 +383,12 @@ static void load_config(ap_config *c) {
                   "; low-level monsters, and a low-level character still gets full XP from high-level monsters (e.g. when partied with a\r\n"
                   "; high-level character). Single player. Off by default.\r\n"
                   "no_level_penalty=1\r\n"
+                  "\r\n"
+                  "[monsters]\r\n"
+                  "; 1 = fix the Nightmare Fire Enchanted death explosion: the game cuts it to 2/3 in Nightmare but to 1/8 in Hell, so\r\n"
+                  "; late-Nightmare monsters explode about twice as hard as Hell ones. This makes Nightmare 1/4, so it grows smoothly\r\n"
+                  "; from Normal into Hell. Normal and Hell are unchanged. Stock LoD 1.13d only.\r\n"
+                  "fire_enchanted_fix=1\r\n"
                   "\r\n"
                   "[mercenary]\r\n"
                   "; 1 = mercenaries run when they follow you instead of always walking (fixes a bug in stock LoD 1.13d).\r\n"
@@ -429,6 +436,7 @@ static void load_config(ap_config *c) {
     g_merc_special = master && GetPrivateProfileIntA("mercenary", "whirlwind", 1, path);
     g_xp_nopenalty = master && GetPrivateProfileIntA("experience", "no_level_penalty", 1, path);
     g_keep_equip = master && GetPrivateProfileIntA("death", "keep_equipment", 1, path);
+    g_fe_fix = master && GetPrivateProfileIntA("monsters", "fire_enchanted_fix", 1, path);
     c->enabled = master && GetPrivateProfileIntA("pickup", "enabled", 1, path);
     c->range = GetPrivateProfileIntA("pickup", "range", 4, path);
     c->rejuv_always = GetPrivateProfileIntA("pickup", "rejuv_always", 1, path);
@@ -506,14 +514,14 @@ static void patch_bytes(BYTE *at, const BYTE *src, int n) {
 }
 static DWORD WINAPI patch_thread(LPVOID arg) {
     (void)arg;
-    if (!g_xp_nopenalty && !g_keep_equip) return 0;
+    if (!g_xp_nopenalty && !g_keep_equip && !g_fe_fix) return 0;
     for (int i = 0; i < 6000; i++) {                       // D2Game.dll loads when a game is started
         HMODULE g = GetModuleHandleA("D2Game.dll");
         if (!g) { Sleep(100); continue; }
         BYTE *base = (BYTE *)g;
         IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
         IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
-        int xp_done = !g_xp_nopenalty, keep_done = !g_keep_equip;
+        int xp_done = !g_xp_nopenalty, keep_done = !g_keep_equip, fe_done = !g_fe_fix;
         for (int k = 0; k < nt->FileHeader.NumberOfSections; k++, sec++) {
             if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
             BYTE *code = base + sec->VirtualAddress; size_t len = sec->Misc.VirtualSize; int patched = 0;
@@ -539,7 +547,16 @@ static DWORD WINAPI patch_thread(LPVOID arg) {
                     }
                 }
             }
+            if (!fe_done) {
+                long at = sig_find_fe_nightmare(code, len, &patched);
+                if (at >= 0) {
+                    fe_done = 1;
+                    if (patched) logf_("fire enchanted fix: D2Game already has the edit (+%lx)", (unsigned long)(code + at - base));
+                    else { patch_bytes(code + at, SIG_FE_NM_FIX, 20); logf_("fire enchanted fix: patched D2Game +%lx (Nightmare explosion x2/3 -> x1/4)", (unsigned long)(code + at - base)); }
+                }
+            }
         }
+        if (!fe_done) logf_("fire enchanted fix: the explosion code was not found in this D2Game (or appears more than once); not patched");
         if (!xp_done) logf_("no XP level penalty: the level-difference code was not found in this D2Game (or appears more than once); not patched");
         if (!keep_done) logf_("keep equipment: the player-creation code was not found in this D2Game (or appears more than once); not patched");
         return 0;

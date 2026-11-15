@@ -113,6 +113,32 @@ static long sig_find_keep_equip(const unsigned char *buf, size_t n, int *patched
     return found;
 }
 
+// Fire Enchanted death explosion (D2Game, stock 1.13d VA 6fcef411, inside the umod-9 death handler 6fcef300): damage = the
+// monster's base max HP x DifficultyLevels MonsterCEDamagePercent, then a hard-coded per-difficulty factor chosen by
+// `mov al,[game+6Dh]`: Normal x3/4, Nightmare x2/3, Hell x1/8. Nightmare's 2/3 is far too weak for its MonLvl HP growth, so
+// late-Nightmare monsters explode ~2x harder than Hell ones. The fix swaps the 20-byte Nightmare block (x2/3) for x1/4
+// (`mov eax,esi ; cdq ; and edx,3 ; add eax,edx ; sar eax,2 ; mov esi,eax` + 7 nops); the block's own `jmp` after it is kept.
+static const unsigned char SIG_FE_NM_ORIG[20] = {0xB8,0x55,0x55,0x55,0x55, 0xF7,0xEE, 0x2B,0xD6, 0xD1,0xFA, 0x8B,0xC2, 0xC1,0xE8,0x1F, 0x03,0xC2, 0x03,0xF0};
+static const unsigned char SIG_FE_NM_FIX[20]  = {0x8B,0xC6, 0x99, 0x83,0xE2,0x03, 0x03,0xC2, 0xC1,0xF8,0x02, 0x8B,0xF0, 0x90,0x90,0x90,0x90,0x90,0x90,0x90};
+// Returns the offset of the 20-byte Nightmare block if the surrounding code occurs exactly once, else -1. *patched = 1 if it
+// already holds SIG_FE_NM_FIX.
+static long sig_find_fe_nightmare(const unsigned char *buf, size_t n, int *patched) {
+    static const unsigned char head[] = {0x8A,0x45,0x6D, 0x84,0xC0, 0x75,0x11, 0x8B,0xC6, 0x99, 0x83,0xE2,0x03, 0x03,0xC2, 0xC1,0xF8,0x02,
+                                         0xF7,0xD8, 0x03,0xF0, 0xEB,0x2B, 0x3C,0x01, 0x75,0x16};
+    static const unsigned char tail[] = {0xEB,0x11, 0x3C,0x02, 0x75,0x0D, 0x8B,0xC6, 0x99, 0x83,0xE2,0x07, 0x03,0xC2, 0xC1,0xF8,0x03, 0x8B,0xF0,
+                                         0x81,0xFE,0x00,0x00,0x10,0x00};
+    const size_t total = sizeof head + 20 + sizeof tail;
+    long found = -1; int count = 0;
+    for (size_t i = 0; i + total <= n; i++) {
+        const unsigned char *p = buf + i;
+        if (memcmp(p, head, sizeof head) || memcmp(p + sizeof head + 20, tail, sizeof tail)) continue;
+        const unsigned char *blk = p + sizeof head;
+        int is_orig = !memcmp(blk, SIG_FE_NM_ORIG, 20), is_fix = !memcmp(blk, SIG_FE_NM_FIX, 20);
+        if (is_orig || is_fix) { found = (long)(i + sizeof head); count++; if (patched) *patched = is_fix; }
+    }
+    return count == 1 ? found : -1;
+}
+
 // ---- mercenary equipment rule: where to patch ---------------------------------------------------------------------------
 // Both D2Game.dll (server) and D2Client.dll (interface) have a function that decides whether a merc may use an item: it first
 // sets an "armor" flag (body armor / helm), then dispatches on the merc's class number to hard-coded item-type checks. The
