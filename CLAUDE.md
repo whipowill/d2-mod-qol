@@ -29,7 +29,7 @@ so there is no anti-cheat concern.
 | KeepEquip: keep equipment on death (in-memory hex edit) | `[death] keep_equipment` | **[confirmed]** (reproduces the user's edit) |
 | merc equipment rules | `[mercenary] equip` | **[confirmed]**: Act 5 (1H+2H swords/axes/maces/hammers), Act 2 spear + Amazon javelin, Rogue crossbows and Amazon bows |
 | Rogue quivers (only with the matching weapon, see section 8) | `[mercenary] equip` | **[confirmed]** (user: "all perfect and working") |
-| drop a dismissed merc's gear | `[mercenary] drop_items` | **[confirmed]** works with several worn items |
+| drop a dismissed merc's gear | `[mercenary] drop_items` | **[confirmed]** works with several worn items; dead merc (server-side copy, NOTES section 9 item 5): built, awaiting in-game test |
 | ring/amulet/boots/gloves/belt on mercs | - | **removed** (no panel slots, see section 8) |
 | wider Maggot Lair / Arcane Sanctuary hallways | `[maps] wide_halls` | **[confirmed]** wider halls in game: `qol.mpq` mounted via Storm #266 (section 14) |
 | Act 5 merc Whirlwind | `[mercenary] whirlwind` | **[confirmed]** travels and carves through packs (section 12); visual still ~0.1 s |

@@ -174,6 +174,14 @@ separate requests. The client received a ground item it never saw leave the merc
 3. **The cursor item has a NEW id** (e.g. 0x7b1, 0x805) - not the merc-side id (0x2f/0x2e/0x79). Dropping with the merc-side id made the server answer 1 (refused); the item stayed on the cursor and the next 0x61 then *equipped it back* onto
    the merc ("I'll put that to good use") so the new merc ended up with no gear. `ap_cursor_id()` (core.c) exposes the cursor item id seen in the item packets.
 4. Only active for stock D2Game 1.13d. If the cursor holds an item at hire time the drop is skipped (gear destroyed as before).
+5. **Dead merc** (built 2026-11-14, awaiting in-game test): the 0x61 handler refuses a dead merc (6fc8c020 -> 6fc8d410 returns 1 for monster mode 0/12 or unit+0xc6 bit 0),
+   so `dm_begin` skips mode 0/12 and the SERVER does it instead. `patch_merc_free_hook` replaces the call at D2Game **+0xa73e3** (`8B D7 8B CE E8` -> 6fc8fc70; ecx=game, edx=old merc,
+   ebx=player) with a stub that calls `qt_dead_merc_drop` first. For each worn item it copies the vendor "inventory full, drop at your feet" path (6fc94e9a):
+   copy **6fd02c40** (eax=game, stdcall(item, 1); serialises + recreates the item with a NEW guid, sockets included; the original is untouched),
+   free spot **6fd00000** (esi=&in coords, stdcall(room, &out, 1) -> room), place **6fcff970** (ecx=item, ebx=room, eax=y, stdcall(game, 0, x); dropper 0 = no notify).
+   Player coords via thunk 6fc2a4a2(unit, &xy), room via 6fc2a412(unit). The client only ever sees a brand-new ground item (like a monster drop), so none of the
+   known-item ordering problems above apply; the originals are freed with the old merc as before. This only runs inside a hire that really replaces the merc,
+   so a refused hire (not enough gold) never copies anything. Log: `merc drop: the merc is dead; dropped N item(s) at your feet`.
 - The NPC dialogue staying open after a hire is NORMAL game behaviour (it also happens with `drop_items=0`). After the held hire is released the server sends 0x27 (NPC info); the game sends no 0x30 during the hold.
 
 ### Game-side facts gathered

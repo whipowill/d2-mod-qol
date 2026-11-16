@@ -741,6 +741,8 @@ static int dm_begin(const void *pkt, int size, int arg, int send_arg_known) {
     if (!send_arg_known || size > (int)sizeof g_dm.held) return 0;
     DWORD u = g_merc_unit;
     if (!dm_hire_class(u)) return 0;
+    DWORD mode = *(DWORD *)(u + 0x10);
+    if (mode == 0 || mode == 12) return 0;                // dead: the game refuses 0x61; the server-side hook below drops its gear
     if (ap_cursor_busy()) { logf_("merc drop: an item is on your cursor; the merc's items are not dropped"); return 0; }
     DWORD inv = *(DWORD *)(u + 0x60);
     if (!inv || !readable((const void *)inv, 0x10)) return 0;
@@ -786,6 +788,79 @@ static void dm_step(DWORD now) {
     if (g_dm.phase == 1) g_dm.idx++;
     g_dm.phase ^= 1;
     g_dm.next_ms = now + 30;                              // the real pacing is the waits for the cursor item above
+}
+
+// ---- dead merc: its gear is dropped by the server, inside the hire ---------------------------------------------------------
+// The "take item off the merc" request (0x61) is refused for a dead merc (handler 6fc8c020 asks 6fc8d410 "is it dead?"), so the
+// sequence above cannot run. Instead we hook the call that frees the replaced merc (D2Game +0xa73e3, inside the hire, section 9)
+// and, if that merc is dead, put a COPY of each worn item on the ground at the player's feet with the game's own code for "you
+// bought an item but your inventory is full" (6fc94e9a: copy 6fd02c40 -> free spot 6fd00000 -> place 6fcff970 with no dropper).
+// The copy has a new id the client has never seen, so it simply appears like any new ground item; the originals are freed with
+// the old merc right after, exactly as the game always did. Nothing here runs unless the hire really replaces the merc.
+// The game functions use private register conventions; these cdecl thunks load the registers: qt_x(fn, args...).
+__asm__(
+    ".text\n"
+    "_qt_isdead:\n"                     // (fn, unit) : eax = unit -> eax != 0 when the unit is dead
+    "  movl 4(%esp), %edx\n  movl 8(%esp), %eax\n  call *%edx\n  ret\n"
+    "_qt_dup:\n"                        // (fn, game, item) : eax = game, stdcall(item, 1) -> eax = the copy
+    "  pushl %esi\n  pushl %ebx\n  pushl %edi\n  pushl %ebp\n"
+    "  movl 0x14(%esp), %edx\n  movl 0x18(%esp), %eax\n  pushl $1\n  pushl 0x20(%esp)\n  call *%edx\n"
+    "  popl %ebp\n  popl %edi\n  popl %ebx\n  popl %esi\n  ret\n"
+    "_qt_spot:\n"                       // (fn, room, in, out) : esi = in coords, stdcall(room, out, 1) -> eax = the room of the free spot
+    "  pushl %esi\n  pushl %ebx\n  pushl %edi\n  pushl %ebp\n"
+    "  movl 0x14(%esp), %eax\n  movl 0x1c(%esp), %esi\n  pushl $1\n  pushl 0x24(%esp)\n  pushl 0x20(%esp)\n  call *%eax\n"
+    "  popl %ebp\n  popl %edi\n  popl %ebx\n  popl %esi\n  ret\n"
+    "_qt_place:\n"                      // (fn, item, room, game, x, y) : ecx = item, ebx = room, eax = y, stdcall(game, 0, x)
+    "  pushl %esi\n  pushl %ebx\n  pushl %edi\n  pushl %ebp\n"
+    "  movl 0x14(%esp), %edx\n  movl 0x18(%esp), %ecx\n  movl 0x1c(%esp), %ebx\n  movl 0x28(%esp), %eax\n"
+    "  pushl 0x24(%esp)\n  pushl $0\n  pushl 0x28(%esp)\n  call *%edx\n"
+    "  popl %ebp\n  popl %edi\n  popl %ebx\n  popl %esi\n  ret\n");
+extern DWORD __cdecl qt_isdead(DWORD fn, DWORD unit);
+extern DWORD __cdecl qt_dup(DWORD fn, DWORD game, DWORD item);
+extern DWORD __cdecl qt_spot(DWORD fn, DWORD room, DWORD *in, DWORD *out);
+extern void __cdecl qt_place(DWORD fn, DWORD item, DWORD room, DWORD game, DWORD x, DWORD y);
+typedef void (__stdcall *dg_coords_t)(DWORD, DWORD *);
+static void __stdcall qt_dead_merc_drop(DWORD game, DWORD merc, DWORD player) {
+    DWORD b = g_dg_base;
+    if (!b || !game || !player || !dm_hire_class(merc) || !qt_isdead(b + 0x6d410, merc)) return;   // a living merc was handled before the hire
+    if (!readable((const void *)player, 0x70) || *(DWORD *)player != 0) return;
+    DWORD inv = *(DWORD *)(merc + 0x60);
+    if (!inv || !readable((const void *)inv, 0x10)) return;
+    int n = 0, lost = 0;
+    for (DWORD loc = 1; loc <= 10; loc++) {
+        DWORD it = dg_body_item(inv, loc);
+        if (!it) continue;
+        DWORD in[2] = {0, 0}, out[2] = {0, 0};
+        ((dg_coords_t)(b + 0xa4a2))(player, in);                                  // D2Common: the player's position
+        DWORD room = ((dg_fn1)(b + 0xa412))(player);                               // D2Common: the player's room
+        DWORD spot = room ? qt_spot(b + 0xe0000, room, in, out) : 0;               // a free spot next to the player
+        if (!spot) { lost++; continue; }
+        DWORD cp = qt_dup(b + 0xe2c40, game, it);                                  // a fresh copy (new id; sockets included)
+        if (!cp) { lost++; continue; }
+        qt_place(b + 0xdf970, cp, spot, game, out[0], out[1]);                     // on the ground (mode 3) in that room
+        n++;
+    }
+    if (n || lost) logf_("merc drop: the merc is dead; dropped %d item(s) at your feet%s", n, lost ? " (some could not be placed)" : "");
+}
+static int patch_merc_free_hook(HMODULE g) {
+    BYTE *site = (BYTE *)g + 0xa73df;
+    static const BYTE expect[5] = {0x8B, 0xD7, 0x8B, 0xCE, 0xE8};                  // mov edx,edi (old merc); mov ecx,esi (game); call free-unit
+    if (!readable(site, 9) || memcmp(site, expect, 5) || abs_call_target(site + 4) != (DWORD)g + 0x6fc70) {
+        logf_("merc drop: the hire's merc-free call is not as expected; dead mercs' gear is not dropped");
+        return 0;
+    }
+    BYTE *st = stub_alloc();
+    if (!st) return 0;
+    BYTE *p = st;
+    *p++ = 0x60;                                                                   // pushad
+    *p++ = 0x53; *p++ = 0x52; *p++ = 0x51;                                         // push ebx (player); push edx (old merc); push ecx (game)
+    p = emit_rel(p, 0xE8, (DWORD)qt_dead_merc_drop);                               // stdcall: pops its 3 arguments
+    *p++ = 0x61;                                                                   // popad
+    emit_rel(p, 0xE9, (DWORD)g + 0x6fc70);                                         // on to the game's free-unit (the return address is still on the stack)
+    BYTE call[5]; call[0] = 0xE8; *(DWORD *)(call + 1) = (DWORD)st - (DWORD)(site + 4 + 5);
+    patch_bytes(site + 4, call, 5);
+    logf_("merc drop: dead mercs' gear will be dropped too (hooked D2Game +a73e3)");
+    return 1;
 }
 
 
@@ -1367,6 +1442,7 @@ static DWORD WINAPI merc_thread(LPVOID arg) {
         IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)g + ((IMAGE_DOS_HEADER *)g)->e_lfanew);
         if (nt->FileHeader.TimeDateStamp != BUGGY_D2GAME_TIMESTAMP) { logf_("merc run fix: this D2Game build is not affected, not installed"); return 0; }
         g_dg_base = (DWORD)g;
+        if (g_merc_drop) patch_merc_free_hook(g);
         unsigned ord = 0;
         for (unsigned o = 10000; o < 11200 && !ord; o++) {
             BYTE *f = (BYTE *)GetProcAddress(c, (LPCSTR)(UINT_PTR)o);
