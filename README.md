@@ -18,7 +18,7 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 - **Merc Whirlwind** - mercs can use Whirlwind-style attacks properly, if they have that skill
 - **Druid Summons** - the minions you had when you logged out will auto respawn
 - **Wide Hallways** - Maggot Lair and Arcane Sanctuary now have wider hallways
-- **Ifinite Ammo** - quivers and throwing weapons no longer consume ammo
+- **Infinite Ammo** - quivers and throwing weapons no longer consume ammo
 
 ### Bug Fixes
 
