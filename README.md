@@ -8,7 +8,7 @@ A mod for Diablo II introducing various quality-of-life features and bug fixes.
 
 All of these features are optional and toggled in the ``qol.ini`` file.
 
-- **Auto Click** - hold spacebar to for repeated left mouse clicks (works w/ PD2)
+- **Auto Click** - hold spacebar for repeated left mouse clicks (works w/ PD2)
 - **Auto Pickup** - potions, scrolls, keys, and gold (works w/ PD2)
 - **Free Respec** - reset your stats or your skills on demand
 - **No XP Penalty** - no longer penalized for fighting low lvl monsters, or partying high level friends
@@ -18,6 +18,7 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 - **Merc Whirlwind** - mercs can use Whirlwind-style attacks properly, if they have that skill
 - **Druid Summons** - the minions you had when you logged out will auto respawn
 - **Wide Hallways** - Maggot Lair and Arcane Sanctuary now have wider hallways
+- **Ifinite Ammo** - quivers and throwing weapons no longer consume ammo
 
 ### Bug Fixes
 

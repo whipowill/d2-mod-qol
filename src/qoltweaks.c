@@ -339,6 +339,7 @@ static int hook_import_ordinal(HMODULE mod, const char *dll, unsigned ord, void 
 static int g_keep_equip = 0;                                    // ini: [death] keep_equipment
 static int g_xp_nopenalty = 0;                                  // ini: [experience] no_level_penalty
 static int g_fe_fix = 0;                                        // ini: [monsters] fire_enchanted_fix
+static int g_infinite_ammo = 0;                                 // ini: [items] infinite_ammo
 static int g_wide_halls = 0;                                    // ini: [maps] wide_halls
 static int g_cpu_fix = 0, g_cpu_throttle = 0;                    // ini: [cpu] fix, throttle_render
 static int g_merc_run = 0;                                      // ini: [mercenary] run
@@ -390,6 +391,11 @@ static void load_config(ap_config *c) {
                   "; from Normal into Hell. Normal and Hell are unchanged. Stock LoD 1.13d only.\r\n"
                   "fire_enchanted_fix=1\r\n"
                   "\r\n"
+                  "[items]\r\n"
+                  "; 1 = quivers and throwing weapons are never used up: arrows and bolts are not subtracted when you shoot, thrown javelins, knives and axes are not subtracted when you throw, and a\r\n"
+                  "; throwing weapon that wears out keeps its whole stack. Applies to every player of a game you host (also on a LAN). Stock LoD 1.13d only.\r\n"
+                  "infinite_ammo=1\r\n"
+                  "\r\n"
                   "[mercenary]\r\n"
                   "; 1 = mercenaries run when they follow you instead of always walking (fixes a bug in stock LoD 1.13d).\r\n"
                   "; Off by default. Only does anything on stock LoD 1.13d.\r\n"
@@ -437,6 +443,7 @@ static void load_config(ap_config *c) {
     g_xp_nopenalty = master && GetPrivateProfileIntA("experience", "no_level_penalty", 1, path);
     g_keep_equip = master && GetPrivateProfileIntA("death", "keep_equipment", 1, path);
     g_fe_fix = master && GetPrivateProfileIntA("monsters", "fire_enchanted_fix", 1, path);
+    g_infinite_ammo = master && GetPrivateProfileIntA("items", "infinite_ammo", 1, path);
     c->enabled = master && GetPrivateProfileIntA("pickup", "enabled", 1, path);
     c->range = GetPrivateProfileIntA("pickup", "range", 4, path);
     c->rejuv_always = GetPrivateProfileIntA("pickup", "rejuv_always", 1, path);
@@ -514,14 +521,14 @@ static void patch_bytes(BYTE *at, const BYTE *src, int n) {
 }
 static DWORD WINAPI patch_thread(LPVOID arg) {
     (void)arg;
-    if (!g_xp_nopenalty && !g_keep_equip && !g_fe_fix) return 0;
+    if (!g_xp_nopenalty && !g_keep_equip && !g_fe_fix && !g_infinite_ammo) return 0;
     for (int i = 0; i < 6000; i++) {                       // D2Game.dll loads when a game is started
         HMODULE g = GetModuleHandleA("D2Game.dll");
         if (!g) { Sleep(100); continue; }
         BYTE *base = (BYTE *)g;
         IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
         IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
-        int xp_done = !g_xp_nopenalty, keep_done = !g_keep_equip, fe_done = !g_fe_fix;
+        int xp_done = !g_xp_nopenalty, keep_done = !g_keep_equip, fe_done = !g_fe_fix, use_done = !g_infinite_ammo, brk_done = !g_infinite_ammo;
         for (int k = 0; k < nt->FileHeader.NumberOfSections; k++, sec++) {
             if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
             BYTE *code = base + sec->VirtualAddress; size_t len = sec->Misc.VirtualSize; int patched = 0;
@@ -547,6 +554,22 @@ static DWORD WINAPI patch_thread(LPVOID arg) {
                     }
                 }
             }
+            if (!use_done) {                                                    // arrows, bolts and thrown weapons are not used up: skip the quantity subtraction
+                long ep = -1, at = sig_find_ammo_use(code, len, &patched, &ep);
+                if (at >= 0) {
+                    use_done = 1;
+                    if (patched) logf_("infinite ammo: D2Game ammo use already patched (+%lx)", (unsigned long)(code + at - base));
+                    else { BYTE jmp[5] = {0xE9, 0, 0, 0, 0}; *(DWORD *)(jmp + 1) = (DWORD)(ep - (at + 5)); patch_bytes(code + at, jmp, 5); logf_("infinite ammo: patched ammo use (D2Game +%lx, jmp +%lx)", (unsigned long)(code + at - base), (unsigned long)(ep - (at + 5))); }
+                }
+            }
+            if (!brk_done) {                                                    // thrown weapons that wear out keep their stack: the unit that breaks is not taken away
+                long at = sig_find_ammo_break(code, len, &patched);
+                if (at >= 0) {
+                    brk_done = 1;
+                    if (patched) logf_("infinite ammo: D2Game throwing-weapon breakage already patched (+%lx)", (unsigned long)(code + at - base));
+                    else { static const BYTE zero = 0x00, nop = 0x90; patch_bytes(code + at + 2, &zero, 1); patch_bytes(code + at + 11, &nop, 1); logf_("infinite ammo: patched throwing-weapon breakage (D2Game +%lx)", (unsigned long)(code + at - base)); }
+                }
+            }
             if (!fe_done) {
                 long at = sig_find_fe_nightmare(code, len, &patched);
                 if (at >= 0) {
@@ -556,6 +579,8 @@ static DWORD WINAPI patch_thread(LPVOID arg) {
                 }
             }
         }
+        if (!use_done) logf_("infinite ammo: the ammo-use code was not found in this D2Game (or appears more than once); not patched");
+        if (!brk_done) logf_("infinite ammo: the throwing-weapon breakage code was not found in this D2Game (or appears more than once); not patched");
         if (!fe_done) logf_("fire enchanted fix: the explosion code was not found in this D2Game (or appears more than once); not patched");
         if (!xp_done) logf_("no XP level penalty: the level-difference code was not found in this D2Game (or appears more than once); not patched");
         if (!keep_done) logf_("keep equipment: the player-creation code was not found in this D2Game (or appears more than once); not patched");

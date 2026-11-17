@@ -242,4 +242,53 @@ __attribute__((unused)) static long sig_find_merc_mask(const unsigned char *buf,
     if (patched) *patched = c2 == 1;
     return (c1 ? a : b) + 16;
 }
+
+// ---- infinite ammo (D2Game, stock 1.13d) ---------------------------------------------------------------------------------
+// 1. Ammo / throwing use, 6fc38ce0 (esi = item, stdcall ret 8): `qty = GetStat(item,0x46) ; qty-1 (floor 0) ; SetStat ; update client ; durability`; returns the OLD quantity (0 = nothing
+//    left). The caller (6fc38dd0) only reaches it for the item in a hand that is a quiver / throwing weapon. We replace the five bytes `dec ebp ; jns ; mov [esp+4],1 (start)` after
+//    `mov ebp,eax` with `jmp <epilogue>`, where the epilogue is the function's own `pop ebp ; pop ecx ; ret 8` with eax = the unchanged quantity: nothing is subtracted or sent.
+//    Returns the offset of the first byte to change (`4d`, or `e9` when patched); *epilogue = offset of that `pop ebp`.
+static long sig_find_ammo_use(const unsigned char *buf, size_t n, int *patched, long *epilogue) {
+    static const unsigned char pre[]  = {0x6A,0x00,0x6A,0x46,0x56,0xC7,0x44,0x24,0x10,0x00,0x00,0x00,0x00,0xE8,0,0,0,0,0x8B,0xE8};
+    static const unsigned char premask[] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,1,1};
+    static const unsigned char tail_o[] = {0x4D,0x79,0x0A,0xC7,0x44,0x24,0x04,0x01,0x00,0x00,0x00,0x33,0xED,0x53,0x57,0x6A,0x00,0x55,0x6A,0x46,0x56,0xE8};
+    static const unsigned char tail_p[] = {0xE9,0,0,0,0,0x24,0x04,0x01,0x00,0x00,0x00,0x33,0xED,0x53,0x57,0x6A,0x00,0x55,0x6A,0x46,0x56,0xE8};
+    static const unsigned char tailmask_p[] = {1,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
+    long found = -1; int count = 0, isp = 0;
+    for (size_t i = 0; i + sizeof pre + sizeof tail_o <= n; i++) {
+        size_t k = 0; while (k < sizeof pre && (!premask[k] || buf[i + k] == pre[k])) k++;
+        if (k < sizeof pre) continue;
+        const unsigned char *t = buf + i + sizeof pre;
+        int o = !memcmp(t, tail_o, sizeof tail_o), p = 1;
+        for (size_t q = 0; q < sizeof tail_p && p; q++) if (tailmask_p[q] && t[q] != tail_p[q]) p = 0;
+        if (o || p) { found = (long)(i + sizeof pre); isp = p && !o; count++; }
+    }
+    if (count != 1) return -1;
+    static const unsigned char ep[] = {0x33,0xC0,0x5D,0x59,0xC2,0x08,0x00};
+    long e = -1;
+    for (size_t i = (size_t)found; i + sizeof ep <= n && i < (size_t)found + 0x200; i++) if (!memcmp(buf + i, ep, sizeof ep)) { e = (long)i + 2; break; }
+    if (e < 0) return -1;
+    if (patched) *patched = isp;
+    if (epilogue) *epilogue = e;
+    return found;
+}
+// 2. Throwing-weapon breakage, 6fd02e10: when a stacked item with durability runs out of durability, one unit of the stack breaks (`qty = GetStat(0x46) ; cmp qty,1 ; jle break_all ;
+//    dec qty ; SetStat(0x46,qty) ; durability = max`), and a last unit breaks the whole item. Two single-byte edits keep the stack: `cmp ebp,1` -> `cmp ebp,0` (a stack of one
+//    is refilled instead of destroyed; items without a quantity still take the old path) and `dec ebp` -> `nop` (the quantity is written back unchanged, durability refills).
+//    Returns the offset of the `cmp ebp,imm8` instruction (imm8 at +2 : 1 -> 0; the `dec ebp` is at +11). *patched = 1 if both edits are present.
+static long sig_find_ammo_break(const unsigned char *buf, size_t n, int *patched) {
+    static const unsigned char o[] = {0x8B,0xE8,0x83,0xFD,0x01,0x6A,0x00,0x0F,0x8E,0,0,0,0,0x4D,0x55,0x6A,0x46,0x57,0xE8,0,0,0,0,0x85,0xF6,0x74,0x13};
+    static const unsigned char p[] = {0x8B,0xE8,0x83,0xFD,0x00,0x6A,0x00,0x0F,0x8E,0,0,0,0,0x90,0x55,0x6A,0x46,0x57,0xE8,0,0,0,0,0x85,0xF6,0x74,0x13};
+    static const unsigned char m[] = {1,1,1,1,1,1,1,1,1,0,0,0,0,1,1,1,1,1,1,0,0,0,0,1,1,1,1};
+    long found = -1; int count = 0, isp = 0;
+    for (size_t i = 0; i + sizeof o <= n; i++) {
+        int a = 1, b = 1;
+        for (size_t k = 0; k < sizeof o && (a || b); k++) if (m[k]) { if (buf[i + k] != o[k]) a = 0; if (buf[i + k] != p[k]) b = 0; }
+        if (a || b) { found = (long)i + 2; isp = b && !a; count++; }
+    }
+    if (count != 1) return -1;
+    if (patched) *patched = isp;
+    return found;
+}
+
 #endif
