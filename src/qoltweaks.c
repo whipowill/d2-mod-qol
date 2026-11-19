@@ -18,6 +18,10 @@ static FILE *g_log;
 static int g_merc_special = 0;                                   // ini: [mercenary] whirlwind
 static int g_respec = 0;                                         // ini: [respec] enabled
 static int g_summons = 0;                                        // ini: [summons] enabled
+static int g_glow_baal = 1;                                      // ini: [glow] hell_baal_required
+static int g_glow_on = 0;                                        // ini: [glow] enabled
+static int g_glow_min = 0;                                       // ini: [glow] min_level (0 = no level needed)
+static volatile int g_glow_state = -1;                           // States.txt id of "fullsetgeneric" (the full-set glow), -1 = not read yet
 static int g_merc_drop = 0;                                      // ini: [mercenary] drop_items
 static int g_merc_equip = 0;                                    // ini: [mercenary] equip
 #define D2GAME_TIMESTAMP_113D 1318970639u    // D2Game.dll of stock LoD 1.13d (Oct 2011)
@@ -137,6 +141,16 @@ static int parse_monstats_cb(const char *txt, int len) {
 }
 static int parse_misc_cb(const char *txt, int len) { return ap_parse_misc(txt, len); }
 static int parse_itemtypes_cb(const char *txt, int len) { return merc_parse_itemtypes(txt, len); }
+// States.txt: the id column (2nd) of the row named "fullsetgeneric" (the glow a full set gives)
+static int parse_states_cb(const char *txt, int len) {
+    static const char key[] = "fullsetgeneric\t";
+    for (int i = 0; i < len; ) {
+        int e = i; while (e < len && txt[e] != '\n') e++;
+        if (e - i > (int)sizeof key && !memcmp(txt + i, key, sizeof key - 1)) { int id = atoi(txt + i + sizeof key - 1); if (id > 0 && id < 256) { g_glow_state = id; return 1; } }
+        i = e + 1;
+    }
+    return 0;
+}
 static ap_summon_t g_sum[24]; static volatile int g_sum_n;     // the druid's summon skills (Skills.txt)
 static int parse_petmon_cb(const char *txt, int len);
 static int parse_skills_cb(const char *txt, int len) {
@@ -149,10 +163,11 @@ static int parse_skills_cb(const char *txt, int len) {
 // Called from the game thread (Storm's file functions are the game's own, so use them where the game does).
 // Retries for a while in case the archives aren't all mounted yet; gives up quietly after that.
 static void misc_tick(void) {
-    static int tries, done_misc, done_mon, done_it, done_sk, done_pm; static DWORD next;
+    static int tries, done_misc, done_mon, done_it, done_sk, done_pm, done_st; static DWORD next;
     if (!g_merc_equip) done_it = 1;
+    if (!g_glow_on) done_st = 1;
     if (!g_summons) done_sk = done_pm = 1;
-    if ((done_misc && done_mon && done_it && done_sk && done_pm) || tries >= 30) return;
+    if ((done_misc && done_mon && done_it && done_sk && done_pm && done_st) || tries >= 30) return;
     DWORD now = GetTickCount();
     if ((int)(now - next) < 0) return;
     next = now + 3000; tries++;
@@ -176,6 +191,12 @@ static void misc_tick(void) {
         int n = storm_read("Data\\global\\excel\\MonStats.txt", parse_petmon_cb);
         if (n >= 0 || n == -2) done_pm = 1;
         if (n > 0) logf_("MonStats.txt: %d summon pet classes (attempt %d)", n, tries);
+    }
+    if (!done_st) {
+        int n = storm_read("Data\\global\\excel\\States.txt", parse_states_cb);
+        if (n >= 0 || n == -2) done_st = 1;
+        if (n > 0) logf_("States.txt: full-set glow is state %d (attempt %d)", g_glow_state, tries);
+        else if (n == 0) logf_("States.txt has no fullsetgeneric row; the glow is off");
     }
     if (!done_it) {
         int n = storm_read("Data\\global\\excel\\ItemTypes.txt", parse_itemtypes_cb);
@@ -406,6 +427,14 @@ static void load_config(ap_config *c) {
                   "; FullEquip=0, RogueCrossBow=0, RogueAmaBow=0 in BaseMod.ini or this stays off. Stock LoD 1.13d only.\r\n"
                   "equip=1\r\n"
                   "\r\n"
+                  "[glow]\r\n"
+                  "; 1 = players get the glowing aura the game shows for a full set of Tal Rasha, Immortal King and the like (cosmetic, no bonuses). Applies to every player of a game you host (also on a LAN). Stock LoD 1.13d only.\r\n"
+                  "enabled=1\r\n"
+                  "; only characters of this level or higher get it (included). 1 = no level needed\r\n"
+                  "min_level=1\r\n"
+                  "; 1 = only characters that have beaten Baal in Hell (the quest data of their save) get the glow; 0 = every character of that level.\r\n"
+                  "hell_baal_required=1\r\n"
+                  "\r\n"
                   "[maps]\r\n"
                   "; 1 = wider hallways in the Maggot Lair and the Arcane Sanctuary (map files from qol.mpq, which must sit next to qol.dll).\r\n"
                   "; Off by default. Takes effect for areas generated after the game starts.\r\n"
@@ -436,6 +465,9 @@ static void load_config(ap_config *c) {
     g_merc_drop = master && GetPrivateProfileIntA("mercenary", "drop_items", 1, path);
     g_respec = master && GetPrivateProfileIntA("respec", "enabled", 1, path);
     g_summons = master && GetPrivateProfileIntA("summons", "enabled", 1, path);
+    g_glow_baal = GetPrivateProfileIntA("glow", "hell_baal_required", 1, path);
+    g_glow_on = master && GetPrivateProfileIntA("glow", "enabled", 0, path);
+    g_glow_min = GetPrivateProfileIntA("glow", "min_level", 1, path); if (g_glow_min < 0 || g_glow_min > 99) g_glow_min = 0;
     g_wide_halls = master && GetPrivateProfileIntA("maps", "wide_halls", 1, path);
     g_cpu_fix = master && GetPrivateProfileIntA("cpu", "fix", 1, path);
     g_cpu_throttle = g_cpu_fix && GetPrivateProfileIntA("cpu", "throttle_render", 0, path);
@@ -1062,6 +1094,30 @@ static void respec_run(DWORD player, int req) {
     if (req & 1) respec_stats(player, c);
     if (req & 2) respec_skills(player, c, g);
 }
+// The full-set glow: the game's own state "fullsetgeneric" (what a full Tal Rasha / Immortal King / Griswold / M'avina / Aldur set sets) switched on for a player of level >= min_level.
+// D2Common #10706 = state test (unit, state), #10708 = state switch (unit, state, on), #11152 = marks the state for the clients' picture (unit, state, on; the game clears that mark after each update
+// it sends, so it is NOT a test), #10550 = stat read (unit, stat, layer); stat 12 = level. First try (11152 alone) was cleared every frame: the log showed it being set again on every packet.
+static void glow_apply(DWORD player) {
+    static FARPROC get_stat, has_state, set_state, gfx_state;
+    if (!get_stat) { HMODULE c = GetModuleHandleA("D2Common.dll"); if (!c) return;
+        get_stat = GetProcAddress(c, (LPCSTR)(UINT_PTR)10550); has_state = GetProcAddress(c, (LPCSTR)(UINT_PTR)10706); set_state = GetProcAddress(c, (LPCSTR)(UINT_PTR)10708); gfx_state = GetProcAddress(c, (LPCSTR)(UINT_PTR)11152); }
+    if (!get_stat || !has_state || !set_state || !gfx_state) return;
+    int lvl = ((int (__stdcall *)(DWORD, DWORD, DWORD))get_stat)(player, 12, 0);
+    static DWORD seen; if (seen != player) { seen = player; logf_("glow: first look at player %lx: level %d, needs %d, state %d, already set %d", (unsigned long)player, lvl, g_glow_min, g_glow_state, ((int (__stdcall *)(DWORD, DWORD))has_state)(player, (DWORD)g_glow_state)); }
+    if (lvl < g_glow_min || lvl > 99) return;
+    if (g_glow_baal) {                                                        // Hell Baal done? quest record of difficulty 2 = *(playerdata + 0x10 + 2*4); D2Common #10156 (record, quest, state) -> bool; quest 40 = Eve of Destruction, state 10 = completed (checked against saves: set once the NM/Normal Baal is beaten)
+        static FARPROC quest_state; if (!quest_state) { HMODULE c = GetModuleHandleA("D2Common.dll"); if (c) quest_state = GetProcAddress(c, (LPCSTR)(UINT_PTR)10156); }
+        DWORD pd = *(DWORD *)(player + 0x14), rec = 0;
+        if (!quest_state || !pd || !readable((const void *)(pd + 0x18), 4) || !(rec = *(DWORD *)(pd + 0x18)) || !readable((const void *)rec, 8)) return;
+        int done = ((int (__stdcall *)(DWORD, DWORD, DWORD))quest_state)(rec, 40, 10);
+        static DWORD qseen; static int qlast = -1; if (qseen != player || qlast != done) { qseen = player; qlast = done; logf_("glow: Hell Baal quest %s", done ? "done" : "not done"); }
+        if (!done) return;
+    }
+    if (((int (__stdcall *)(DWORD, DWORD))has_state)(player, (DWORD)g_glow_state)) return;
+    ((void (__stdcall *)(DWORD, DWORD, DWORD))set_state)(player, (DWORD)g_glow_state, 1);
+    ((void (__stdcall *)(DWORD, DWORD, DWORD))gfx_state)(player, (DWORD)g_glow_state, 1);
+    logf_("glow: level %d player %lx got the full-set glow (state %d), state now reads %d", lvl, (unsigned long)player, g_glow_state, ((int (__stdcall *)(DWORD, DWORD))has_state)(player, (DWORD)g_glow_state));
+}
 static void __cdecl qt_srv_tick(DWORD game, DWORD player, DWORD id, const unsigned char *buf, DWORD size) {
     static DWORD last_player, next;
     if (g_respec && id == 0x15 && size > 4 && size < 64 && readable(buf, size) && readable((const void *)player, 0xB0) && *(DWORD *)player == 0) {   // a chat line from ANY player: only a player unit resets itself
@@ -1071,6 +1127,7 @@ static void __cdecl qt_srv_tick(DWORD game, DWORD player, DWORD id, const unsign
             respec_run(player, req);
         }
     }
+    if (g_glow_on && g_glow_state > 0 && readable((const void *)player, 0xB0) && *(DWORD *)player == 0) glow_apply(player);   // every player's packets pass here: each one gets the glow
     if (player != last_player) {                                              // a new game: note who is playing
         if (!readable((const void *)player, 0x20) || *(DWORD *)player != 0) return;
         DWORD me = local_player_id();                                         // another player's packets (a Druid joining, say) must not replace "the player": only our own unit counts
@@ -1137,7 +1194,7 @@ static int patch_summon_hook(HMODULE g) {
 }
 static DWORD WINAPI summon_thread(LPVOID arg) {
     (void)arg;
-    if (!g_summons && !g_respec) return 0;
+    if (!g_summons && !g_respec && !g_glow_on) return 0;
     for (int i = 0; i < 6000; i++) {
         HMODULE g = GetModuleHandleA("D2Game.dll");
         if (g) {

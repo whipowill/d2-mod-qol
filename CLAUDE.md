@@ -35,6 +35,7 @@ so there is no anti-cheat concern.
 | Act 5 merc Whirlwind | `[mercenary] whirlwind` | **[confirmed]** travels and carves through packs (section 12); visual still ~0.1 s |
 | Fire Enchanted Nightmare explosion fix (in-memory, NM x2/3 -> x1/4) | `[monsters] fire_enchanted_fix` | built, default on, awaiting in-game test (section 18) |
 | infinite ammo: quivers and throwing weapons are never used up (in-memory, 2 patches) | `[items] infinite_ammo` | built, default on, awaiting in-game test (NOTES section 19) |
+| full-set glow for every player at level >= N (in-memory; state "fullsetgeneric" via D2Common #11152) | `[glow] min_level` | built 2026-11-18, default 0 (off), awaiting in-game test (NOTES section 20) |
 
 ---------------------------------------------------------------------------------------------------------------------------------
 ## 2. Build, test, install

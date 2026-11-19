@@ -19,6 +19,7 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 - **Druid Summons** - the minions you had when you logged out will auto respawn
 - **Wide Hallways** - Maggot Lair and Arcane Sanctuary now have wider hallways
 - **Infinite Ammo** - quivers and throwing weapons no longer consume ammo
+- **Achievement Aura** - bask in the glow of your achievement with Hell completion aura
 
 ### Bug Fixes
 
