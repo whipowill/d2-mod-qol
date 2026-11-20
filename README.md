@@ -11,15 +11,16 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 - **Auto Click** - hold spacebar for repeated left mouse clicks (works w/ PD2)
 - **Auto Pickup** - potions, scrolls, keys, and gold (works w/ PD2)
 - **Free Respec** - reset your stats or your skills on demand
-- **No XP Penalty** - no longer penalized for fighting low lvl monsters, or partying high level friends
+- **NoXP Penalty** - no longer penalized for fighting low lvl monsters, or partying high level friends
 - **Death Keep** - no longer lose your gear when you die
 - **Merc Equip** - mercs can equip various item types consistent w/ their class, including quivers
 - **Merc Drop** - mercs will drop their gear if you hire a new one
-- **Merc Whirlwind** - mercs can use Whirlwind-style attacks properly, if they have that skill
-- **Druid Summons** - the minions you had when you logged out will auto respawn
+- **Merc Whirl** - mercs can use Whirlwind-style attacks properly, if they have that skill
+- **Zookeeper** - the minions you had when you logged out will auto respawn
 - **Wide Hallways** - Maggot Lair and Arcane Sanctuary now have wider hallways
 - **Infinite Ammo** - quivers and throwing weapons no longer consume ammo
 - **Achievement Aura** - bask in the glow of your achievement with Hell completion aura
+- **Random DClone** - stay on your toes w/ randomized DClone spawns
 
 ### Bug Fixes
 
@@ -31,6 +32,7 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 
 - ``.reset skills`` - reset your skills
 - ``.reset stats`` - reset your stats
+- ``.dclone`` - force DClone to spawn
 
 ## Install
 

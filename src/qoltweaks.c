@@ -16,6 +16,10 @@
 
 static FILE *g_log;
 static int g_merc_special = 0;                                   // ini: [mercenary] whirlwind
+static int g_dclone = 0, g_dc_diff[3]; static double g_dc_chance = 0, g_dc_minutes = 10;   // ini: [dclone] enabled, roll_minutes, chance_per_roll (percent), normal/nightmare/hell
+static int g_dc_announce = 1;                                      // ini: [dclone] announce
+static volatile int g_dc_pending;                                  // 1 = the next super unique the game creates becomes Diablo Clone (read by the stub in D2Game)
+static volatile int g_dc_class;                                    // MonStats class id of "diabloclone" (0 = not found yet)
 static int g_respec = 0;                                         // ini: [respec] enabled
 static int g_summons = 0;                                        // ini: [summons] enabled
 static int g_glow_baal = 1;                                      // ini: [glow] hell_baal_required
@@ -131,6 +135,12 @@ static int storm_read(const char *name, int (*parse)(const char *, int)) {
     return n;
 }
 
+static int parse_dc_cb(const char *txt, int len) {
+    static const char names[1][24] = {"diabloclone"}; int id = -1;
+    int n = ap_monster_ids(txt, len, names, 1, &id);
+    if (n > 0 && id > 0) g_dc_class = id;
+    return n;
+}
 // Class ids of the mercenaries (MonStats.txt rows with AI = Hireable); the merc running fix needs them.
 static volatile int g_hire_n; static int g_hire_ids[16];
 static int parse_monstats_cb(const char *txt, int len) {
@@ -163,11 +173,12 @@ static int parse_skills_cb(const char *txt, int len) {
 // Called from the game thread (Storm's file functions are the game's own, so use them where the game does).
 // Retries for a while in case the archives aren't all mounted yet; gives up quietly after that.
 static void misc_tick(void) {
-    static int tries, done_misc, done_mon, done_it, done_sk, done_pm, done_st; static DWORD next;
+    static int tries, done_misc, done_mon, done_it, done_sk, done_pm, done_st, done_dc; static DWORD next;
     if (!g_merc_equip) done_it = 1;
     if (!g_glow_on) done_st = 1;
     if (!g_summons) done_sk = done_pm = 1;
-    if ((done_misc && done_mon && done_it && done_sk && done_pm && done_st) || tries >= 30) return;
+    if (!g_dclone) done_dc = 1;
+    if ((done_misc && done_mon && done_it && done_sk && done_pm && done_st && done_dc) || tries >= 30) return;
     DWORD now = GetTickCount();
     if ((int)(now - next) < 0) return;
     next = now + 3000; tries++;
@@ -181,6 +192,12 @@ static void misc_tick(void) {
         int n = storm_read("Data\\global\\excel\\MonStats.txt", parse_monstats_cb);
         if (n >= 0 || n == -2) done_mon = 1;
         if (n > 0) logf_("MonStats.txt: %d mercenary classes (attempt %d)", n, tries);
+    }
+    if (!done_dc) {
+        int n = storm_read("Data\\global\\excel\\MonStats.txt", parse_dc_cb);
+        if (n >= 0 || n == -2) done_dc = 1;
+        if (n > 0) logf_("MonStats.txt: diabloclone is class %d (attempt %d)", g_dc_class, tries);
+        else if (n == 0) logf_("MonStats.txt has no diabloclone row; the Diablo Clone event is off");
     }
     if (!done_sk) {
         int n = storm_read("Data\\global\\excel\\Skills.txt", parse_skills_cb);
@@ -266,6 +283,8 @@ static int respec_parse(const unsigned char *b, int size) {                  // 
         t[n] = 0;
         if (!strcmp(t, "reset stats")) return 1;
         if (!strcmp(t, "reset skills")) return 2;
+        if (!strcmp(t, "dclone")) return 3;
+        if (!strcmp(t, "dclone now")) return 4;
         return 0;
     }
     return 0;
@@ -465,6 +484,12 @@ static void load_config(ap_config *c) {
     g_merc_drop = master && GetPrivateProfileIntA("mercenary", "drop_items", 1, path);
     g_respec = master && GetPrivateProfileIntA("respec", "enabled", 1, path);
     g_summons = master && GetPrivateProfileIntA("summons", "enabled", 1, path);
+    g_dclone = master && GetPrivateProfileIntA("dclone", "enabled", 1, path);
+    { char b[32];
+      GetPrivateProfileStringA("dclone", "roll_minutes", "10", b, sizeof b, path); g_dc_minutes = atof(b); if (g_dc_minutes < 0.1) g_dc_minutes = 0.1; if (g_dc_minutes > 600) g_dc_minutes = 600;
+      GetPrivateProfileStringA("dclone", "chance_per_roll", "5", b, sizeof b, path); g_dc_chance = atof(b); if (g_dc_chance < 0) g_dc_chance = 0; if (g_dc_chance > 100) g_dc_chance = 100; }
+    g_dc_announce = GetPrivateProfileIntA("dclone", "announce", 1, path);
+    g_dc_diff[0] = GetPrivateProfileIntA("dclone", "normal", 1, path); g_dc_diff[1] = GetPrivateProfileIntA("dclone", "nightmare", 1, path); g_dc_diff[2] = GetPrivateProfileIntA("dclone", "hell", 1, path);
     g_glow_baal = GetPrivateProfileIntA("glow", "hell_baal_required", 1, path);
     g_glow_on = master && GetPrivateProfileIntA("glow", "enabled", 0, path);
     g_glow_min = GetPrivateProfileIntA("glow", "min_level", 1, path); if (g_glow_min < 0 || g_glow_min > 99) g_glow_min = 0;
@@ -1118,15 +1143,83 @@ static void glow_apply(DWORD player) {
     ((void (__stdcall *)(DWORD, DWORD, DWORD))gfx_state)(player, (DWORD)g_glow_state, 1);
     logf_("glow: level %d player %lx got the full-set glow (state %d), state now reads %d", lvl, (unsigned long)player, g_glow_state, ((int (__stdcall *)(DWORD, DWORD))has_state)(player, (DWORD)g_glow_state));
 }
+// ---- Diablo Clone: a random event, and the chat command .dclone (for testing) -------------------------------------------------------------
+// D2Game 1.13d 6fce8d70 (RVA 0xC8D70) = SpawnMonster(id in ecx, mode in edx, game, room1, x, y, 1, 0), callee pops 6 stack args (same function PlugY uses
+// for the Uber minions and the world event; the entry bytes are checked before every use). The monster class is looked up by its MonStats id "diabloclone"
+// (row 333 in a stock table). The game's own stats then come from that row's Normal / Nightmare / Hell columns. The player's room1 is *(*(unit+0x2c)+0x1c),
+// the position two words of the path (+2 x, +6 y); the level number is room1 +0x10 -> room2 +0x58 -> level +0x1d0 (towns are skipped). Game difficulty = game+0x6D (PlugY's struct).
+typedef DWORD (__fastcall *dc_spawn_t)(DWORD id, DWORD mode, DWORD game, DWORD room, DWORD x, DWORD y, DWORD one, DWORD zero);
+static int dclone_spawn(DWORD game, DWORD player, const char *why) {
+    HMODULE g = GetModuleHandleA("D2Game.dll"); if (!g || !readable((const void *)player, 0x30) || !readable((const void *)game, 0x80)) return 0;
+    static const BYTE sig[11] = {0x83,0xEC,0x28,0x89,0x4C,0x24,0x0C,0x8B,0x4C,0x24,0x30};
+    BYTE *fn = (BYTE *)g + 0xC8D70;
+    if (!readable(fn, 11) || memcmp(fn, sig, 11)) { logf_("dclone: SpawnMonster is not where expected; not spawning"); return 0; }
+    int diff = *(BYTE *)(game + 0x6D); if (diff < 0 || diff > 2) { logf_("dclone: odd difficulty byte %d; not spawning", diff); return 0; }
+    DWORD path = *(DWORD *)(player + 0x2C); if (!readable((const void *)path, 0x20)) return 0;
+    DWORD room = *(DWORD *)(path + 0x1C); if (!readable((const void *)room, 0x20)) return 0;
+    DWORD r2 = *(DWORD *)(room + 0x10), lvl = r2 && readable((const void *)r2, 0x60) ? *(DWORD *)(r2 + 0x58) : 0;
+    int lno = lvl && readable((const void *)lvl, 0x1D4) ? (int)*(DWORD *)(lvl + 0x1D0) : -1;
+    if (lno <= 0 || lno > 136) { logf_("dclone: %s: could not read the level number (%d); not spawning, so he can never appear in a town by mistake", why, lno); return 0; }
+    if (lno == 1 || lno == 40 || lno == 75 || lno == 103 || lno == 109) { logf_("dclone: %s: the player is in a town (level %d); not spawning", why, lno); return 0; }
+    int x = *(WORD *)(path + 2), y = *(WORD *)(path + 6);
+    static const int off[10][2] = {{6,0},{-6,0},{0,6},{0,-6},{5,5},{-5,-5},{5,-5},{-5,5},{3,0},{0,0}};
+    int start = rand() % 8;
+    dc_spawn_t spawn = (dc_spawn_t)(void *)fn;
+    for (int k = 0; k < 10; k++) {
+        int o = k < 8 ? (start + k) % 8 : k;
+        DWORD u = spawn(g_dc_class, 1, game, room, (DWORD)(x + off[o][0]), (DWORD)(y + off[o][1]), 1, 0);
+        if (u) { logf_("dclone: %s: spawned class %d at %d,%d (offset %d,%d) on difficulty %d, level %d, unit %lx", why, g_dc_class, x + off[o][0], y + off[o][1], off[o][0], off[o][1], diff, lno, (unsigned long)u); return 1; }
+    }
+    logf_("dclone: %s: SpawnMonster returned nothing for every offset (player at %d,%d, room %lx, difficulty %d)", why, x, y, (unsigned long)room, diff);
+    return 0;
+}
+// The announcement is the game's own world-event packet (S->C 0x5A, 40 bytes: type, fct 0x12 = "Diablo Walks the Earth", id 4, param dword, word, 31 bytes), the layout PlugY
+// sends for its Diablo Clone event, broadcast to every client of the game with D2Game 1.13d BroadcastFunction RVA 0xBB510 (eax = game, edi = callback, ebx = param) and
+// SendPacket RVA 0xDB780 (eax = client, two stack args data and size). Both are wrapped by small stubs into fastcall form, exactly as PlugY's wrappers do.
+typedef void (__fastcall *dc_bcast_t)(DWORD game, void *fn, void *param);
+typedef void (__fastcall *dc_send_t)(void *client, const void *data, DWORD size);
+static dc_bcast_t g_dc_bcast; static dc_send_t g_dc_send;
+static void __fastcall dc_send_cb(void *client, DWORD *param) { if (g_dc_send && client) g_dc_send(client, (const void *)param[0], param[1]); }
+static void dclone_announce(DWORD game) {
+    if (!g_dc_bcast || !g_dc_send) { logf_("dclone: the announcement is not available (stubs not installed)"); return; }
+    static BYTE pkt[40]; memset(pkt, 0, sizeof pkt); pkt[0] = 0x5A; pkt[1] = 0x12; pkt[2] = 4;
+    DWORD param[2] = {(DWORD)pkt, sizeof pkt};
+    g_dc_bcast(game, (void *)dc_send_cb, param);
+    logf_("dclone: announcement sent to the clients of the game");
+}
+static void dclone_trigger(DWORD game, const char *why) {
+    if (g_dc_class <= 0) { logf_("dclone: %s: class id not known yet; nothing done", why); return; }
+    if (g_dc_pending) { logf_("dclone: %s: he is already on the way (the next super unique will be him)", why); return; }
+    g_dc_pending = 1;
+    logf_("dclone: %s: Diablo Clone will replace the next super unique the game creates", why);
+    if (g_dc_announce) dclone_announce(game);
+}
+static void dclone_random(DWORD game, DWORD player) {                          // a clock starts when a game loads; every roll_minutes it rolls chance_per_roll percent
+    static DWORD last_game, next; static int seeded;
+    if (!seeded) { seeded = 1; srand(GetTickCount()); }
+    DWORD now = GetTickCount();
+    if (game != last_game) { last_game = game; g_dc_pending = 0; next = now + (DWORD)(g_dc_minutes * 60000.0); logf_("dclone: clock started for this game (first roll in %.2f min, %.4f%% per roll, difficulty byte %d)", g_dc_minutes, g_dc_chance, readable((const void *)game, 0x80) ? (int)*(BYTE *)(game + 0x6D) : -1); return; }
+    if ((int)(now - next) < 0) return;
+    next = now + (DWORD)(g_dc_minutes * 60000.0);
+    if (!g_dc_chance || !readable((const void *)game, 0x80)) { logf_("dclone: no roll (chance %.4f, game readable %d)", g_dc_chance, readable((const void *)game, 0x80)); return; }
+    int diff = *(BYTE *)(game + 0x6D); if (diff < 0 || diff > 2 || !g_dc_diff[diff]) { logf_("dclone: no roll: difficulty byte %d is not enabled (or not 0-2)", diff); return; }
+    double roll = ((double)(((unsigned)rand() << 15) | ((unsigned)rand() & 0x7FFF)) / 1073741824.0) * 100.0;   // 0..100 with about 0.0000001 resolution
+    logf_("dclone: roll %.4f (needs under %.4f)", roll, g_dc_chance);
+    if (roll >= g_dc_chance) return;
+    (void)player; dclone_trigger(game, "random");
+}
 static void __cdecl qt_srv_tick(DWORD game, DWORD player, DWORD id, const unsigned char *buf, DWORD size) {
     static DWORD last_player, next;
-    if (g_respec && id == 0x15 && size > 4 && size < 64 && readable(buf, size) && readable((const void *)player, 0xB0) && *(DWORD *)player == 0) {   // a chat line from ANY player: only a player unit resets itself
+    if ((g_respec || g_dclone) && id == 0x15 && size > 4 && size < 64 && readable(buf, size) && readable((const void *)player, 0xB0) && *(DWORD *)player == 0) {   // a chat line from ANY player: only a player unit resets itself
         int req = respec_parse(buf, (int)size);
-        if (req) {
+        if (req == 3) { if (g_dclone) { logf_("dclone: .dclone typed in the chat"); dclone_trigger(game, "command"); } }
+        else if (req == 4) { if (g_dclone) { logf_("dclone: .dclone now typed in the chat"); dclone_spawn(game, player, "command (now)"); } }
+        else if (req && g_respec) {
             logf_("respec: %s requested by a player in the game", req == 1 ? "stats" : "skills");
             respec_run(player, req);
         }
     }
+    if (g_dclone && g_dc_class > 0 && readable((const void *)player, 0xB0) && *(DWORD *)player == 0 && *(DWORD *)(player + 0xC) == local_player_id()) dclone_random(game, player);   // only our own character's packets drive the timer
     if (g_glow_on && g_glow_state > 0 && readable((const void *)player, 0xB0) && *(DWORD *)player == 0) glow_apply(player);   // every player's packets pass here: each one gets the glow
     if (player != last_player) {                                              // a new game: note who is playing
         if (!readable((const void *)player, 0x20) || *(DWORD *)player != 0) return;
@@ -1192,15 +1285,47 @@ static int patch_summon_hook(HMODULE g) {
     logf_("summons: watching the live pets (installed in D2Game)");
     return 1;
 }
+// Diablo Clone hooks in D2Game 1.13d: (1) the only call to the super-unique spawn function (call at RVA 0xCFBCF -> 0xCDE20, the site PlugY patches for its event) goes through a stub that,
+// while g_dc_pending is set, puts the class of "diabloclone" in ecx (the monster id register of that function) and returns 0 afterwards (no minions), like PlugY's spawnDClone;
+// (2) the two wrapper stubs of the announcement (see dclone_announce).
+static int dclone_install(HMODULE g) {
+    BYTE *site = (BYTE *)g + 0xCFBCF, *orig = (BYTE *)g + 0xCDE20;
+    if (!readable(site, 5) || site[0] != 0xE8 || (DWORD)(site + 5) + *(DWORD *)(site + 1) != (DWORD)orig) { logf_("dclone: the super unique call site is not as expected; the event is not installed"); return 0; }
+    BYTE *st = stub_alloc(), *bc = stub_alloc(), *sn = stub_alloc();
+    if (!st || !bc || !sn) return 0;
+    BYTE *p = st;
+    *p++ = 0x83; *p++ = 0x3D; *(DWORD *)p = (DWORD)&g_dc_pending; p += 4; *p++ = 0x00;          // cmp dword [pending],0
+    *p++ = 0x74; BYTE *je = p++;                                                                    // je original
+    *p++ = 0xC7; *p++ = 0x05; *(DWORD *)p = (DWORD)&g_dc_pending; p += 4; *(DWORD *)p = 0; p += 4;  // mov dword [pending],0
+    *p++ = 0x8B; *p++ = 0x0D; *(DWORD *)p = (DWORD)&g_dc_class; p += 4;                              // mov ecx,[class]
+    for (int i = 0; i < 5; i++) { *p++ = 0xFF; *p++ = 0x74; *p++ = 0x24; *p++ = 0x14; }             // push dword [esp+0x14] x5: copy the five stack arguments
+    p = emit_rel(p, 0xE8, (DWORD)orig);                                                             // call original (it pops its 5 arguments)
+    *p++ = 0x31; *p++ = 0xC0; *p++ = 0xC2; *p++ = 0x14; *p++ = 0x00;                                // xor eax,eax; ret 0x14
+    *je = (BYTE)(p - (je + 1));
+    p = emit_rel(p, 0xE9, (DWORD)orig);                                                             // original: jmp CDE20
+    BYTE patch[5]; patch[0] = 0xE8; *(DWORD *)(patch + 1) = (DWORD)st - (DWORD)(site + 5);
+    patch_bytes(site, patch, 5);
+    BYTE *q = bc;                                                                                   // fastcall(game, fn, param) -> eax = game, edi = fn, ebx = param
+    *q++ = 0x57; *q++ = 0x53; *q++ = 0x89; *q++ = 0xC8; *q++ = 0x89; *q++ = 0xD7; *q++ = 0x8B; *q++ = 0x5C; *q++ = 0x24; *q++ = 0x0C;
+    q = emit_rel(q, 0xE8, (DWORD)g + 0xBB510);
+    *q++ = 0x5B; *q++ = 0x5F; *q++ = 0xC2; *q++ = 0x04; *q++ = 0x00;
+    q = sn;                                                                                          // fastcall(client, data, size) -> eax = client, push size, push data
+    *q++ = 0x89; *q++ = 0xC8; *q++ = 0xFF; *q++ = 0x74; *q++ = 0x24; *q++ = 0x04; *q++ = 0x52;
+    q = emit_rel(q, 0xE8, (DWORD)g + 0xDB780);
+    *q++ = 0xC2; *q++ = 0x04; *q++ = 0x00;
+    g_dc_bcast = (dc_bcast_t)(void *)bc; g_dc_send = (dc_send_t)(void *)sn;
+    logf_("dclone: the super unique spawn is hooked (D2Game +cfbcf); the event is ready");
+    return 1;
+}
 static DWORD WINAPI summon_thread(LPVOID arg) {
     (void)arg;
-    if (!g_summons && !g_respec && !g_glow_on) return 0;
+    if (!g_summons && !g_respec && !g_glow_on && !g_dclone) return 0;
     for (int i = 0; i < 6000; i++) {
         HMODULE g = GetModuleHandleA("D2Game.dll");
         if (g) {
             IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)g + ((IMAGE_DOS_HEADER *)g)->e_lfanew);
             if (nt->FileHeader.TimeDateStamp != D2GAME_TIMESTAMP_113D) logf_("summons: this D2Game build is not supported; not installed");
-            else patch_summon_hook(g);
+            else { patch_summon_hook(g); if (g_dclone) dclone_install(g); }
             return 0;
         }
         Sleep(100);
