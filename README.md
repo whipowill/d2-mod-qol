@@ -21,6 +21,7 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 - **Infinite Ammo** - quivers and throwing weapons no longer consume ammo
 - **Achievement Aura** - bask in the glow of your achievement with Hell completion aura
 - **Random DClone** - stay on your toes w/ randomized DClone spawns
+- **Terror Zones** - random zones will double XP, gold, density, and magic find
 
 ### Bug Fixes
 
@@ -32,7 +33,8 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 
 - ``.reset skills`` - reset your skills
 - ``.reset stats`` - reset your stats
-- ``.dclone`` - force DClone to spawn
+- ``.dclone`` - start the DClone event now (he takes the place of the next super unique you meet)
+- ``.dclone now`` - spawn DClone right next to you (testing)
 
 ## Install
 

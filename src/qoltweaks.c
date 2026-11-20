@@ -10,6 +10,10 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <wchar.h>
 #include "core.h"
 #include "sig.h"
 #include "merc.h"
@@ -135,6 +139,48 @@ static int storm_read(const char *name, int (*parse)(const char *, int)) {
     return n;
 }
 
+// ---- Terror Zone (step 1: the hourly pick and the announcement) ---------------------------------------------------------------------------
+// Stateless like D2R's: the zone is a function of the real clock slot (unix time / rotate_minutes), so every game and every player with the same Levels.txt sees the same
+// zone and nothing is saved. Candidates: the non-town areas of Levels.txt that have a waypoint (Waypoint column set), names from its LevelName column. Announced in purple
+// with the client's PrintGameString (D2Client 1.13d +0x75EB0, as Quartermaster does) when a game is entered and whenever the slot changes. Runs on the client game thread.
+static int g_tz_hell_only = 0, g_tz_xp = 0, g_tz_gold = 0, g_tz_force = 0;   // kept at 0 (random); a fixed zone is not offered any more           // ini: [terrorzone] hell_only, xp_pct, gold_pct
+static int tz_active(void);                                             // defined with the server-side effects
+static void tz_apply_level(void);
+static int g_tz_lvl_bonus = 10, g_tz_lvl_min = 85, g_tz_lvl_max = 99;      // ini: level_bonus (every difficulty), hell_min_level, hell_max_level (Hell only)
+#define TZ_MAX 160
+static int g_tz = 0, g_tz_minutes = 60, g_tz_seed = 0, g_tz_n, g_tz_wp_only = 0; static char g_tz_name[TZ_MAX][40]; static int g_tz_id[TZ_MAX];
+static int g_tz_grp[TZ_MAX], g_tz_ngrp, g_tz_rep[TZ_MAX];                      // areas with the same name in the same act form ONE zone (Tal Rasha's seven tombs, a dungeon's twin levels): zone = group, rep = its first area
+static int g_tz_act[TZ_MAX];
+static int g_tz_den[TZ_MAX][3], g_tz_umin[TZ_MAX][3], g_tz_umax[TZ_MAX][3];     // the area's MonDen / MonUMin / MonUMax per difficulty, as Levels.txt says (to recognise the record layout in memory)
+static int g_tz_dens_pct = 0, g_tz_elite_pct = 0;                    // ini: density_pct, elite_pct
+static int parse_tz_cb(const char *txt, int len) {
+    int n = 0, col_id = -1, col_wp = -1, col_nm = -1, col_act = -1, line = 0, c_den[3] = {-1, -1, -1}, c_umin[3] = {-1, -1, -1}, c_umax[3] = {-1, -1, -1};
+    const char *p = txt, *end = txt + len;
+    while (p < end) {
+        const char *e = memchr(p, '\n', (size_t)(end - p)); if (!e) e = end;
+        char buf[4096]; size_t ln = (size_t)(e - p); if (ln > sizeof buf - 1) ln = sizeof buf - 1; memcpy(buf, p, ln); buf[ln] = 0; if (ln && buf[ln - 1] == '\r') buf[ln - 1] = 0;
+        char *f[320]; int nf = 0; char *c = buf; f[nf++] = c;
+        for (; *c && nf < 320; c++) if (*c == '\t') { *c = 0; f[nf++] = c + 1; }
+        if (line == 0) { for (int i = 0; i < nf; i++) { if (!strcmp(f[i], "Id")) col_id = i; else if (!strcmp(f[i], "Waypoint")) col_wp = i; else if (!strcmp(f[i], "LevelName")) col_nm = i; else if (!strcmp(f[i], "Act")) col_act = i;
+                else if (!strcmp(f[i], "MonDen")) c_den[0] = i; else if (!strcmp(f[i], "MonDen(N)")) c_den[1] = i; else if (!strcmp(f[i], "MonDen(H)")) c_den[2] = i;
+                else if (!strcmp(f[i], "MonUMin")) c_umin[0] = i; else if (!strcmp(f[i], "MonUMin(N)")) c_umin[1] = i; else if (!strcmp(f[i], "MonUMin(H)")) c_umin[2] = i;
+                else if (!strcmp(f[i], "MonUMax")) c_umax[0] = i; else if (!strcmp(f[i], "MonUMax(N)")) c_umax[1] = i; else if (!strcmp(f[i], "MonUMax(H)")) c_umax[2] = i; }
+            if (col_id < 0 || col_wp < 0 || col_nm < 0) return 0; }
+        else if (nf > col_nm && nf > col_wp && nf > col_id && f[col_nm][0] && n < TZ_MAX && (g_tz_wp_only ? (f[col_wp][0] && strcmp(f[col_wp], "255")) : (c_den[2] >= 0 && nf > c_den[2] && atoi(f[c_den[2]]) > 0))) {   // any area with monsters in Hell (or only the waypoint areas)
+            int id = atoi(f[col_id]);
+            if (id == 1 || id == 40 || id == 75 || id == 103 || id == 109) { line++; p = e + 1; continue; }     // the five towns
+            g_tz_id[n] = id; snprintf(g_tz_name[n], sizeof g_tz_name[n], "%s", f[col_nm]);
+            for (char *q = g_tz_name[n] + strlen(g_tz_name[n]); q > g_tz_name[n] && q[-1] == ' '; ) *--q = 0;       // "Palace Cellar Level 1 " has a trailing space
+            for (int d = 0; d < 3; d++) { g_tz_den[n][d] = c_den[d] >= 0 && nf > c_den[d] ? atoi(f[c_den[d]]) : -1; g_tz_umin[n][d] = c_umin[d] >= 0 && nf > c_umin[d] ? atoi(f[c_umin[d]]) : -1; g_tz_umax[n][d] = c_umax[d] >= 0 && nf > c_umax[d] ? atoi(f[c_umax[d]]) : -1; }
+            g_tz_act[n] = col_act >= 0 && nf > col_act ? atoi(f[col_act]) : 0;
+            n++; }
+        line++; p = e + 1;
+    }
+    int ng = 0;                                                                                      // zones: same LevelName and act
+    for (int i = 0; i < n; i++) { int g = -1; for (int j = 0; j < i && g < 0; j++) if (g_tz_act[j] == g_tz_act[i] && !strcmp(g_tz_name[j], g_tz_name[i])) g = g_tz_grp[j];
+        if (g < 0) { g = ng; g_tz_rep[ng++] = i; } g_tz_grp[i] = g; }
+    g_tz_ngrp = ng; g_tz_n = n; return n;
+}
 static int parse_dc_cb(const char *txt, int len) {
     static const char names[1][24] = {"diabloclone"}; int id = -1;
     int n = ap_monster_ids(txt, len, names, 1, &id);
@@ -173,12 +219,13 @@ static int parse_skills_cb(const char *txt, int len) {
 // Called from the game thread (Storm's file functions are the game's own, so use them where the game does).
 // Retries for a while in case the archives aren't all mounted yet; gives up quietly after that.
 static void misc_tick(void) {
-    static int tries, done_misc, done_mon, done_it, done_sk, done_pm, done_st, done_dc; static DWORD next;
+    static int tries, done_misc, done_mon, done_it, done_sk, done_pm, done_st, done_dc, done_tz; static DWORD next;
     if (!g_merc_equip) done_it = 1;
     if (!g_glow_on) done_st = 1;
     if (!g_summons) done_sk = done_pm = 1;
     if (!g_dclone) done_dc = 1;
-    if ((done_misc && done_mon && done_it && done_sk && done_pm && done_st && done_dc) || tries >= 30) return;
+    if (!g_tz) done_tz = 1;
+    if ((done_misc && done_mon && done_it && done_sk && done_pm && done_st && done_dc && done_tz) || tries >= 30) return;
     DWORD now = GetTickCount();
     if ((int)(now - next) < 0) return;
     next = now + 3000; tries++;
@@ -192,6 +239,12 @@ static void misc_tick(void) {
         int n = storm_read("Data\\global\\excel\\MonStats.txt", parse_monstats_cb);
         if (n >= 0 || n == -2) done_mon = 1;
         if (n > 0) logf_("MonStats.txt: %d mercenary classes (attempt %d)", n, tries);
+    }
+    if (!done_tz) {
+        int n = storm_read("Data\\global\\excel\\Levels.txt", parse_tz_cb);
+        if (n >= 0 || n == -2) done_tz = 1;
+        if (n > 0) logf_("Levels.txt: %d terror zone areas in %d zones (%s, attempt %d)", n, g_tz_ngrp, g_tz_wp_only ? "waypoint areas only" : "any area with monsters", tries);
+        else if (n == 0) logf_("Levels.txt: no waypoint areas found; terror zones are off");
     }
     if (!done_dc) {
         int n = storm_read("Data\\global\\excel\\MonStats.txt", parse_dc_cb);
@@ -272,6 +325,64 @@ static DWORD local_player_id(void) {
     if (!u || !readable((const void *)u, 0x30) || *(DWORD *)u != 0) return 0;
     return *(DWORD *)(u + 0xC);
 }
+static BYTE *stub_alloc(void); static BYTE *emit(BYTE *p, const void *src, int n); static BYTE *emit_rel(BYTE *p, BYTE op, DWORD target);
+// The name the game SHOWS for an area is not always Levels.txt's LevelName (Glacial Caves Level 1 is "Glacial Trail" in game): ask the game's own GetLevelName (D2Client 1.13d +0x18250, level in ESI,
+// the same function qol_ui's overlay uses) and keep the text per candidate. Falls back to the LevelName column when it cannot be read.
+static char g_tz_disp[TZ_MAX][48];
+static const char *tz_name(int k) {
+    if (k < 0 || k >= g_tz_n) return "";
+    if (!g_tz_disp[k][0]) {
+        static wchar_t *(*getname)(DWORD); static int tried;
+        if (!tried) { HMODULE cl = GetModuleHandleA("D2Client.dll");
+            if (cl) { tried = 1; IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)cl + ((IMAGE_DOS_HEADER *)cl)->e_lfanew);
+                BYTE *th = nt->FileHeader.TimeDateStamp == 1318970890u ? stub_alloc() : NULL;
+                if (th) { static const BYTE a[] = {0x60, 0x8B, 0x74, 0x24, 0x24}; static const BYTE b[] = {0x89, 0x44, 0x24, 0x1C, 0x61, 0xC3};   // pushad; mov esi,[esp+24h]; call fn; mov [esp+1Ch],eax; popad; ret
+                    BYTE *q = emit(th, a, 5); q = emit_rel(q, 0xE8, (DWORD)((BYTE *)cl + 0x18250)); emit(q, b, 6); getname = (wchar_t *(*)(DWORD))(void *)th; } } }
+        wchar_t *w = getname ? getname((DWORD)g_tz_id[k]) : NULL;
+        if (w && readable(w, 8)) {
+            if (w[0] == 0xFF && w[1] == L'c' && w[2]) w += 3;                                         // already coloured by us
+            int n = 0; for (; n < 47 && w[n]; n++) g_tz_disp[k][n] = (char)(w[n] < 256 ? w[n] : '?');
+            while (n > 0 && g_tz_disp[k][n - 1] == ' ') n--; g_tz_disp[k][n] = 0;
+            if (n > 0) logf_("terror zone: area %d is shown in game as \"%s\" (Levels.txt says \"%s\")", g_tz_id[k], g_tz_disp[k], g_tz_name[k]);
+        }
+    }
+    return g_tz_disp[k][0] ? g_tz_disp[k] : g_tz_name[k];
+}
+static int tz_index_for(long long slot) {                                              // splitmix64 of the clock slot (and the seed)
+    if (g_tz_force > 0) for (int i = 0; i < g_tz_n; i++) if (g_tz_id[i] == g_tz_force) return g_tz_rep[g_tz_grp[i]];     // only used if g_tz_force is set by a dev build: always this area's zone
+    unsigned long long z = (unsigned long long)slot * 0x9E3779B97F4A7C15ull + (unsigned long long)g_tz_seed * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; z = (z ^ (z >> 27)) * 0x94D049BB133111EBull; z ^= z >> 31;
+    return g_tz_rep[(int)(z % (unsigned long long)g_tz_ngrp)];                                  // uniform over the zones
+}
+static void tz_tick(DWORD now) {
+    tz_apply_level();                                                                                    // keeps the zone's area level in step with the clock (every frame is cheap: it only acts on a change)
+    static DWORD next, announce_at, last_player; static long long last_slot = -1; static void (__stdcall *print)(const wchar_t *, int); static int tried;
+    if (!g_tz || g_tz_n <= 0 || (int)(now - next) < 0) return;
+    next = now + 1000;
+    if (!tried) { tried = 1; HMODULE cl = GetModuleHandleA("D2Client.dll");
+        if (cl) { IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)cl + ((IMAGE_DOS_HEADER *)cl)->e_lfanew);
+            if (nt->FileHeader.TimeDateStamp == 1318970890u) print = (void (__stdcall *)(const wchar_t *, int))((BYTE *)cl + 0x75EB0); else logf_("terror zone: this D2Client build is not supported; the zone is only logged"); } }
+    DWORD me = local_player_id();
+    if (!me) { last_player = 0; return; }
+    long long slot = (long long)(time(NULL) / ((long long)g_tz_minutes * 60));
+    if (me != last_player) {                                                                          // entering a game: a new random sequence of zones, announced once the screen is up
+        last_player = me; announce_at = now + 4000; last_slot = slot - 1;
+        g_tz_seed = (int)(GetTickCount() ^ (DWORD)time(NULL) * 2654435761u ^ (GetCurrentProcessId() << 7)); if (!g_tz_seed) g_tz_seed = 1; }       // entering a game: announce once the screen is up
+    if (slot == last_slot || (int)(now - announce_at) < 0) return;
+    if (!tz_active()) return;                                                                        // hell_only and this is not Hell: no zone (checked again at the next slot / next game)
+    { int k0 = tz_index_for(slot); tz_name(k0);                                                      // the name the game shows for the area: wait up to 8 s for it, never announce the internal Levels.txt name unless it cannot be read
+      if (!g_tz_disp[k0][0] && (int)(now - announce_at) < 8000) return;
+      if (!g_tz_disp[k0][0]) logf_("terror zone: the game's own name for area %d could not be read; announcing the Levels.txt name \"%s\"", g_tz_id[k0], g_tz_name[k0]); }
+    last_slot = slot;
+    int k = tz_index_for(slot);
+    logf_("terror zone: slot %lld -> %s (level %d)", slot, tz_name(k), g_tz_id[k]);
+    if (print) {
+        static const char *lines[] = { "Heightened terror grips %s...", "A dark presence stirs in %s...", "The shadows deepen over %s...", "Something hungers in %s...", "Dread gathers in %s..." };
+        const char *fmt = lines[(unsigned)(slot ^ g_tz_seed) % (sizeof lines / sizeof *lines)];
+        char nb[200]; const char *pc = strstr(fmt, "%s");
+        if (pc) snprintf(nb, sizeof nb, "%.*s%s%s", (int)(pc - fmt), fmt, tz_name(k), pc + 2); else snprintf(nb, sizeof nb, "%s %s", fmt, tz_name(k));
+        wchar_t m[256]; swprintf(m, 256, L"\xFF" L"c;%hs", nb); print(m, 0); }
+}
 // -- chat commands: .reset stats / .reset skills (also with a leading '/') --
 // The command is read on the SERVER side, from the chat packet of ANY player in the game (the server runs in the process that hosts the game: a bot that
 // joined a TCP/IP game has no server of its own, so a client-side flag could never be acted on, 2026-11-13). Returns 1 (stats), 2 (skills) or 0.
@@ -320,6 +431,7 @@ static int __stdcall h_recv(void *buf, int cap) {
     }
     misc_tick();
     DWORD now = GetTickCount();
+    tz_tick(now);
     if (g_summons) sum_step(now);
     if (g_dm_active_flag) dm_step(now);
     // The live position read walks several game structures; only do it when summons need it every packet, or when a
@@ -484,6 +596,17 @@ static void load_config(ap_config *c) {
     g_merc_drop = master && GetPrivateProfileIntA("mercenary", "drop_items", 1, path);
     g_respec = master && GetPrivateProfileIntA("respec", "enabled", 1, path);
     g_summons = master && GetPrivateProfileIntA("summons", "enabled", 1, path);
+    g_tz = master && GetPrivateProfileIntA("terrorzone", "enabled", 1, path);
+    g_tz_hell_only = GetPrivateProfileIntA("terrorzone", "hell_only", 0, path);
+    g_tz_wp_only = GetPrivateProfileIntA("terrorzone", "waypoint_areas_only", 0, path);
+    g_tz_dens_pct = GetPrivateProfileIntA("terrorzone", "density_pct", 100, path); if (g_tz_dens_pct < 0) g_tz_dens_pct = 0; if (g_tz_dens_pct > 1000) g_tz_dens_pct = 1000;
+    g_tz_elite_pct = GetPrivateProfileIntA("terrorzone", "elite_pct", 100, path); if (g_tz_elite_pct < 0) g_tz_elite_pct = 0; if (g_tz_elite_pct > 1000) g_tz_elite_pct = 1000;
+    g_tz_lvl_bonus = GetPrivateProfileIntA("terrorzone", "level_bonus", 10, path); if (g_tz_lvl_bonus < 0) g_tz_lvl_bonus = 0; if (g_tz_lvl_bonus > 99) g_tz_lvl_bonus = 99;
+    g_tz_lvl_min = GetPrivateProfileIntA("terrorzone", "hell_min_level", 85, path); if (g_tz_lvl_min < 0) g_tz_lvl_min = 0; if (g_tz_lvl_min > 110) g_tz_lvl_min = 110;
+    g_tz_lvl_max = GetPrivateProfileIntA("terrorzone", "hell_max_level", 99, path); if (g_tz_lvl_max < 1) g_tz_lvl_max = 1; if (g_tz_lvl_max > 110) g_tz_lvl_max = 110;
+    g_tz_xp = GetPrivateProfileIntA("terrorzone", "xp_pct", 100, path); if (g_tz_xp < 0) g_tz_xp = 0; if (g_tz_xp > 10000) g_tz_xp = 10000;
+    g_tz_gold = GetPrivateProfileIntA("terrorzone", "gold_pct", 100, path); if (g_tz_gold < 0) g_tz_gold = 0; if (g_tz_gold > 10000) g_tz_gold = 10000;
+    g_tz_minutes = GetPrivateProfileIntA("terrorzone", "rotate_minutes", 60, path); if (g_tz_minutes < 1) g_tz_minutes = 1; if (g_tz_minutes > 1440) g_tz_minutes = 1440;
     g_dclone = master && GetPrivateProfileIntA("dclone", "enabled", 1, path);
     { char b[32];
       GetPrivateProfileStringA("dclone", "roll_minutes", "10", b, sizeof b, path); g_dc_minutes = atof(b); if (g_dc_minutes < 0.1) g_dc_minutes = 0.1; if (g_dc_minutes > 600) g_dc_minutes = 600;
@@ -1201,10 +1324,9 @@ static void dclone_random(DWORD game, DWORD player) {                          /
     if (game != last_game) { last_game = game; g_dc_pending = 0; next = now + (DWORD)(g_dc_minutes * 60000.0); logf_("dclone: clock started for this game (first roll in %.2f min, %.4f%% per roll, difficulty byte %d)", g_dc_minutes, g_dc_chance, readable((const void *)game, 0x80) ? (int)*(BYTE *)(game + 0x6D) : -1); return; }
     if ((int)(now - next) < 0) return;
     next = now + (DWORD)(g_dc_minutes * 60000.0);
-    if (!g_dc_chance || !readable((const void *)game, 0x80)) { logf_("dclone: no roll (chance %.4f, game readable %d)", g_dc_chance, readable((const void *)game, 0x80)); return; }
-    int diff = *(BYTE *)(game + 0x6D); if (diff < 0 || diff > 2 || !g_dc_diff[diff]) { logf_("dclone: no roll: difficulty byte %d is not enabled (or not 0-2)", diff); return; }
+    if (!g_dc_chance || !readable((const void *)game, 0x80)) return;
+    int diff = *(BYTE *)(game + 0x6D); if (diff < 0 || diff > 2 || !g_dc_diff[diff]) return;
     double roll = ((double)(((unsigned)rand() << 15) | ((unsigned)rand() & 0x7FFF)) / 1073741824.0) * 100.0;   // 0..100 with about 0.0000001 resolution
-    logf_("dclone: roll %.4f (needs under %.4f)", roll, g_dc_chance);
     if (roll >= g_dc_chance) return;
     (void)player; dclone_trigger(game, "random");
 }
@@ -1317,15 +1439,132 @@ static int dclone_install(HMODULE g) {
     logf_("dclone: the super unique spawn is hooked (D2Game +cfbcf); the event is ready");
     return 1;
 }
+// ---- Terror Zone effects, server side (D2Game 1.13d) ---------------------------------------------------------------------------------------------
+// Experience (stat 13) and gold (stat 14) are put on the player through D2Common #10590 SetUnitStat(unit, stat, value, layer) and #10645 AddPlayerStat(unit, stat, delta, layer) (stdcall; the kill-XP
+// code around D2Game +8a2e4..+8a4f7 reads the base with #10216 and writes with #10590; gold pickups go through one of the two). Both are IAT-hooked in D2Game: for a player standing in the
+// current terror zone, a gain is multiplied by (100 + pct) / 100. Losses (death, level-up resets) are never touched. Hell only unless hell_only=0 (game difficulty byte = game+0x6D).
+static int (__stdcall *o_tz_set)(DWORD, DWORD, DWORD, DWORD), (__stdcall *o_tz_add)(DWORD, DWORD, int, DWORD), (__stdcall *o_tz_getbase)(DWORD, DWORD, DWORD);
+static int unit_levelno(DWORD u) {
+    if (!u || !readable((const void *)u, 0x30) || *(DWORD *)u != 0) return -1;                       // players only
+    DWORD path = *(DWORD *)(u + 0x2C), room, r2, lvl;
+    if (!readable((const void *)path, 0x20) || !(room = *(DWORD *)(path + 0x1C)) || !readable((const void *)room, 0x20)) return -1;
+    if (!(r2 = *(DWORD *)(room + 0x10)) || !readable((const void *)r2, 0x60) || !(lvl = *(DWORD *)(r2 + 0x58)) || !readable((const void *)lvl, 0x1D4)) return -1;
+    return (int)*(DWORD *)(lvl + 0x1D0);
+}
+static int tz_active(void) {                                                                          // false only when hell_only is set and the game is known not to be Hell
+    DWORD g = g_srv_game;
+    if (!g_tz_hell_only || !g || !readable((const void *)g, 0x80)) return 1;
+    return *(BYTE *)(g + 0x6D) == 2;
+}
+static int tz_here(DWORD unit) {                                                                      // is this player standing in the current terror zone?
+    if (!g_tz || g_tz_n <= 0 || !tz_active()) return 0;
+    int lno = unit_levelno(unit); if (lno <= 0) return 0;
+    int z = tz_index_for((long long)(time(NULL) / ((long long)g_tz_minutes * 60)));
+    for (int i = 0; i < g_tz_n; i++) if (g_tz_grp[i] == g_tz_grp[z] && g_tz_id[i] == lno) return 1;
+    return 0;
+}
+static unsigned tz_mult(unsigned delta, int stat) {
+    int pct = stat == 13 ? g_tz_xp : g_tz_gold; if (pct <= 0) return delta;
+    unsigned long long v = (unsigned long long)delta * (100u + (unsigned)pct) / 100u;
+    return v > 0x7FFFFFFFu ? 0x7FFFFFFFu : (unsigned)v;
+}
+static int __stdcall h_tz_set(DWORD unit, DWORD stat, DWORD value, DWORD layer) {
+    if ((stat == 13 && g_tz_xp > 0) || (stat == 14 && g_tz_gold > 0)) {
+        int old = o_tz_getbase ? o_tz_getbase(unit, stat, layer) : -1;
+        if (old >= 0 && (int)value > old && tz_here(unit)) {
+            unsigned nv = (unsigned)old + tz_mult((unsigned)((int)value - old), (int)stat);
+            value = nv; }
+    }
+    return o_tz_set(unit, stat, value, layer);
+}
+static int __stdcall h_tz_add(DWORD unit, DWORD stat, int delta, DWORD layer) {
+    if (delta > 0 && ((stat == 13 && g_tz_xp > 0) || (stat == 14 && g_tz_gold > 0)) && tz_here(unit)) {
+        int nd = (int)tz_mult((unsigned)delta, (int)stat);
+        delta = nd; }
+    return o_tz_add(unit, stat, delta, layer);
+}
+// The zone's area level: Levels.txt MonLvlEx (the expansion monster level of the area, per difficulty) in D2Common's in-memory table. D2Common #10142 returns the level record (first word = the
+// level id); MonLvlEx is the word at record +0x16 + 2 * difficulty (the same fields qol_ui's map overlay reads). The area's monsters are created at this level, and a monster's level sets
+// the item level of its drops, so raising it raises both. Applied to the zone of the current clock slot (original saved and put back when the zone changes or the game is not Hell with
+// hell_only), result = max(original + level_bonus, min_level) limited to max_level (item level tops out at 99). Only areas created after the change get monsters of the new level.
+typedef struct { BYTE *rec; int id; WORD lvl_orig, lvl_set; int lvl; DWORD d_orig, d_set; int dens; BYTE u_orig[2], u_set[2]; BYTE *u_at[2]; int ue; } tzm_t;
+static tzm_t g_tzm[12]; static int g_tzm_n, g_tzm_group = -1, g_tzm_diff = -1;               // the areas of the current zone that were changed, and what they were
+static void tz_restore_member(tzm_t *m, int diff) {
+    if (m->lvl && readable(m->rec, 0x1C) && *(WORD *)(m->rec + 0x16 + 2 * diff) == m->lvl_set) *(WORD *)(m->rec + 0x16 + 2 * diff) = m->lvl_orig;
+    if (m->dens && readable(m->rec, 0x30) && *(DWORD *)(m->rec + 0x1C + 4 * diff) == m->d_set) *(DWORD *)(m->rec + 0x1C + 4 * diff) = m->d_orig;
+    if (m->ue) for (int q = 0; q < 2; q++) if (m->u_at[q] && readable(m->u_at[q], 1) && *m->u_at[q] == m->u_set[q]) *m->u_at[q] = m->u_orig[q];
+    logf_("terror zone: area %d put back (level %d%s%s)", m->id, m->lvl_orig, m->dens ? ", density" : "", m->ue ? ", elite packs" : "");
+}
+static int tz_apply_member(tzm_t *m, int ci, int diff, BYTE *(__stdcall *get_rec)(DWORD)) {            // candidate ci: raise its level, density, elite packs and colour its name; 1 = a record was found
+    int id = g_tz_id[ci]; memset(m, 0, sizeof *m);
+    BYTE *rec = get_rec((DWORD)id);
+    if (!rec || !readable(rec, 0x1C) || *(WORD *)rec != (WORD)id) return 0;
+    m->rec = rec; m->id = id;
+    WORD *f = (WORD *)(rec + 0x16 + 2 * diff); int orig = *f; m->lvl_orig = (WORD)orig;
+    if (orig > 0 && (g_tz_lvl_bonus > 0 || (diff == 2 && g_tz_lvl_min > 0))) {                         // the area level: original + bonus, and (Hell only) at least hell_min_level, never above the maximum
+        int nl = orig + g_tz_lvl_bonus; if (diff == 2 && nl < g_tz_lvl_min) nl = g_tz_lvl_min; if (nl > (diff == 2 ? g_tz_lvl_max : 99)) nl = diff == 2 ? g_tz_lvl_max : 99; if (nl < orig) nl = orig;
+        m->lvl_set = (WORD)nl; *f = (WORD)nl; m->lvl = 1;
+        logf_("terror zone: area %d (%s) level %d -> %d", id, diff == 0 ? "Normal" : diff == 1 ? "Nightmare" : "Hell", orig, nl); }
+    // density (MonDen, a DWORD per difficulty at record +0x1C) and elite packs (MonUMin / MonUMax, bytes at +0x28..+0x2D): the layout is recognised by comparing the record with what Levels.txt says
+    if (readable(rec, 0x30)) {
+        if (g_tz_dens_pct > 0 && g_tz_den[ci][0] >= 0 && *(DWORD *)(rec + 0x1C) == (DWORD)g_tz_den[ci][0] && *(DWORD *)(rec + 0x20) == (DWORD)g_tz_den[ci][1] && *(DWORD *)(rec + 0x24) == (DWORD)g_tz_den[ci][2]) {
+            DWORD *d = (DWORD *)(rec + 0x1C + 4 * diff); m->d_orig = *d; m->d_set = (DWORD)(((unsigned long long)m->d_orig * (100u + (unsigned)g_tz_dens_pct) + 50) / 100); *d = m->d_set; m->dens = 1;
+            logf_("terror zone: area %d density %lu -> %lu", id, (unsigned long)m->d_orig, (unsigned long)m->d_set); }
+        else if (g_tz_dens_pct > 0) logf_("terror zone: area %d density not changed: the record at +0x1c is %lu %lu %lu, Levels.txt says %d %d %d", id, (unsigned long)*(DWORD *)(rec + 0x1C), (unsigned long)*(DWORD *)(rec + 0x20), (unsigned long)*(DWORD *)(rec + 0x24), g_tz_den[ci][0], g_tz_den[ci][1], g_tz_den[ci][2]);
+        if (g_tz_elite_pct > 0) {
+            const BYTE *u = rec + 0x28; int lay = 0;                                                  // layout A: min[3] then max[3]; layout B: min, max per difficulty
+            int a = 1, b = 1; for (int d = 0; d < 3; d++) { if (u[d] != g_tz_umin[ci][d] || u[3 + d] != g_tz_umax[ci][d]) a = 0; if (u[2 * d] != g_tz_umin[ci][d] || u[2 * d + 1] != g_tz_umax[ci][d]) b = 0; }
+            lay = a ? 1 : b ? 2 : 0;
+            if (lay) { BYTE *pm = rec + 0x28 + (lay == 1 ? diff : 2 * diff), *px = rec + 0x28 + (lay == 1 ? 3 + diff : 2 * diff + 1);
+                m->u_at[0] = pm; m->u_at[1] = px; m->u_orig[0] = *pm; m->u_orig[1] = *px;
+                int nmx = (*px * (100 + g_tz_elite_pct) + 99) / 100; if (nmx < 1) nmx = 1; if (nmx > 255) nmx = 255;
+                int nmn = (*pm * (100 + g_tz_elite_pct) + 99) / 100; if (nmn > nmx) nmn = nmx; if (nmn > 255) nmn = 255;
+                m->u_set[0] = (BYTE)nmn; m->u_set[1] = (BYTE)nmx; *pm = m->u_set[0]; *px = m->u_set[1]; m->ue = 1;
+                logf_("terror zone: area %d elite packs %d-%d -> %d-%d (layout %c)", id, m->u_orig[0], m->u_orig[1], nmn, nmx, lay == 1 ? 'A' : 'B'); }
+            else logf_("terror zone: area %d elite packs not changed: the record at +0x28 is %d %d %d %d %d %d, Levels.txt says min %d %d %d max %d %d %d", id, u[0], u[1], u[2], u[3], u[4], u[5], g_tz_umin[ci][0], g_tz_umin[ci][1], g_tz_umin[ci][2], g_tz_umax[ci][0], g_tz_umax[ci][1], g_tz_umax[ci][2]); }
+    }
+    return 1;
+}
+static void tz_apply_level(void) {
+    static BYTE *(__stdcall *get_rec)(DWORD); static DWORD last_run; DWORD tnow = GetTickCount();
+    if (tnow - last_run < 250) return; last_run = tnow;                                                    // a few times a second is plenty
+    if (!g_tz || g_tz_n <= 0) return;
+    if (!get_rec) { HMODULE c = GetModuleHandleA("D2Common.dll"); if (c) get_rec = (BYTE *(__stdcall *)(DWORD))(void *)GetProcAddress(c, (LPCSTR)(UINT_PTR)10142); if (!get_rec) return; }
+    DWORD g = g_srv_game; int diff = (g && readable((const void *)g, 0x80)) ? (int)*(BYTE *)(g + 0x6D) : -1;
+    int want = -1;                                                                                         // the zone (its group number) that should be active now, or -1
+    if (diff >= 0 && diff <= 2 && tz_active() && local_player_id()) want = g_tz_grp[tz_index_for((long long)(time(NULL) / ((long long)g_tz_minutes * 60)))];
+    if (want == g_tzm_group && diff == g_tzm_diff) return;
+    for (int i = 0; i < g_tzm_n; i++) tz_restore_member(&g_tzm[i], g_tzm_diff);                            // put the old zone back (if nobody else changed it meanwhile)
+    g_tzm_n = 0; g_tzm_group = want; g_tzm_diff = diff;
+    if (want >= 0) for (int ci = 0; ci < g_tz_n && g_tzm_n < 12; ci++) if (g_tz_grp[ci] == want && tz_apply_member(&g_tzm[g_tzm_n], ci, diff, get_rec)) g_tzm_n++;
+}
+// For other mods (qol_ui's map overlay): the Levels.txt id of the current terror zone, or 0 when there is none (feature off, not Hell with hell_only, no game yet). Plain cdecl export.
+__declspec(dllexport) int qol_terror_zone(void) {                                                       // the first area of the current zone (kept for older qol_ui builds)
+    if (!g_tz || g_tz_n <= 0 || !local_player_id() || !tz_active()) return 0;
+    return g_tz_id[tz_index_for((long long)(time(NULL) / ((long long)g_tz_minutes * 60)))];
+}
+__declspec(dllexport) int qol_in_terror_zone(int level) {                                              // 1 when this area is part of the current zone (a zone can have several areas)
+    if (!g_tz || g_tz_n <= 0 || !local_player_id() || !tz_active()) return 0;
+    int z = tz_index_for((long long)(time(NULL) / ((long long)g_tz_minutes * 60)));
+    for (int i = 0; i < g_tz_n; i++) if (g_tz_grp[i] == g_tz_grp[z] && g_tz_id[i] == level) return 1;
+    return 0;
+}
+static void tz_install(HMODULE g) {
+    HMODULE c = GetModuleHandleA("D2Common.dll"); if (!c || (!g_tz_xp && !g_tz_gold)) return;
+    o_tz_getbase = (int (__stdcall *)(DWORD, DWORD, DWORD))(void *)GetProcAddress(c, (LPCSTR)(UINT_PTR)10216);
+    int a = hook_import_ordinal(g, "D2Common.dll", 10590, h_tz_set, (void **)&o_tz_set);
+    int b = hook_import_ordinal(g, "D2Common.dll", 10645, h_tz_add, (void **)&o_tz_add);
+    logf_("terror zone: experience / gold hooks in D2Game (SetUnitStat %d, AddPlayerStat %d, base-stat reader %s): xp +%d%%, gold +%d%%, %s", a, b, o_tz_getbase ? "ok" : "MISSING", g_tz_xp, g_tz_gold, g_tz_hell_only ? "Hell only" : "all difficulties");
+}
 static DWORD WINAPI summon_thread(LPVOID arg) {
     (void)arg;
-    if (!g_summons && !g_respec && !g_glow_on && !g_dclone) return 0;
+    if (!g_summons && !g_respec && !g_glow_on && !g_dclone && !g_tz) return 0;
     for (int i = 0; i < 6000; i++) {
         HMODULE g = GetModuleHandleA("D2Game.dll");
         if (g) {
             IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)g + ((IMAGE_DOS_HEADER *)g)->e_lfanew);
             if (nt->FileHeader.TimeDateStamp != D2GAME_TIMESTAMP_113D) logf_("summons: this D2Game build is not supported; not installed");
-            else { patch_summon_hook(g); if (g_dclone) dclone_install(g); }
+            else { patch_summon_hook(g); if (g_dclone) dclone_install(g); if (g_tz) tz_install(g); }
             return 0;
         }
         Sleep(100);

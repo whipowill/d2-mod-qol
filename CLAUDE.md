@@ -36,6 +36,8 @@ so there is no anti-cheat concern.
 | Fire Enchanted Nightmare explosion fix (in-memory, NM x2/3 -> x1/4) | `[monsters] fire_enchanted_fix` | built, default on, awaiting in-game test (section 18) |
 | infinite ammo: quivers and throwing weapons are never used up (in-memory, 2 patches) | `[items] infinite_ammo` | built, default on, awaiting in-game test (NOTES section 19) |
 | full-set glow for every player at level >= N (in-memory; state "fullsetgeneric" via D2Common #11152) | `[glow] min_level` | built 2026-11-18, default 0 (off), awaiting in-game test (NOTES section 20) |
+| random Diablo Clone event: a timed roll, the game's announcement, he replaces the next super unique; `.dclone`, `.dclone now` | `[dclone]` | built 2026-11-19, rolls and chat command seen working, in-game fight/stats awaiting (NOTES section 21) |
+| Terror Zones: a random area per hour / game with purple chat announcement; area level, monster density, elite packs, XP and gold boosts; qol_ui shows its level in purple | `[terrorzone]` | built 2026-11-19, effects seen applied and put back in the logs, monster behaviour and drops not verified (NOTES section 22) |
 
 ---------------------------------------------------------------------------------------------------------------------------------
 ## 2. Build, test, install
