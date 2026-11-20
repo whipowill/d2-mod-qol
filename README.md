@@ -20,8 +20,8 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 - **Wide Hallways** - Maggot Lair and Arcane Sanctuary now have wider hallways
 - **Infinite Ammo** - quivers and throwing weapons no longer consume ammo
 - **Achievement Aura** - bask in the glow of your achievement with Hell completion aura
-- **Random DClone** - stay on your toes w/ randomized DClone spawns
-- **Terror Zones** - random zones will double XP, gold, density, and magic find
+- **Random DClone** - stay on your toes w/ randomized DClone spawns as you play
+- **Terror Zones** - random zones will double gold, XP, MF, and monster density
 
 ### Bug Fixes
 
