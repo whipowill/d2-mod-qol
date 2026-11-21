@@ -51,6 +51,9 @@ static DWORD WINAPI log_flusher(LPVOID arg) {
     return 0;
 }
 static void core_log(const char *m) { logf_("%s", m); }
+#ifdef NHAMDEBUG
+static DWORD WINAPI nh_thread(LPVOID arg);
+#endif
 
 static int readable(const void *p, size_t n) {
     MEMORY_BASIC_INFORMATION mbi;
@@ -371,8 +374,8 @@ static volatile LONG g_tz_lock; static long long g_tz_start, g_tz_expire; static
 #define TZ_MAX_GAMES 1                                                                                // a zone is live for ONE game (not configurable)
 static int tz_spent(void) { return g_tz_games > TZ_MAX_GAMES; }              // the zone has already had its max_games_per_zone games: it is over for you until the next one
 static volatile DWORD g_srv_game;                                                                       // (the server's game, set with the pet code below)
-// Areas a zone must not start in: the Den of Evil (empty once its quest is done).
-static int tz_area_ok(int id, int diff) { (void)diff; return id != 8; }
+// Areas a zone must not start in: the Den of Evil (empty once its quest is done) and the Valley of Snakes (nothing in it).
+static int tz_area_ok(int id, int diff) { (void)diff; return id != 8 && id != 45; }
 static void tz_state_pick(long long now) {                                                            // a new random zone, different from the last one, starting now
     static unsigned s; if (!s) s = GetTickCount() ^ (unsigned)now ^ (GetCurrentProcessId() * 2654435761u);
     s ^= s << 13; s ^= s >> 17; s ^= s << 5; s += (unsigned)now;
@@ -547,6 +550,7 @@ static int hook_import_ordinal(HMODULE mod, const char *dll, unsigned ord, void 
 
 static int g_keep_equip = 0;                                    // ini: [death] keep_equipment
 static int g_xp_nopenalty = 0;                                  // ini: [experience] no_level_penalty
+static int g_nham = 0;                                          // ini: [combat] fix_nham
 static int g_hit100 = 0;                                        // ini: [combat] hit_cap_100
 static int g_fe_fix = 0;                                        // ini: [monsters] fire_enchanted_fix
 static int g_infinite_ammo = 0;                                 // ini: [items] infinite_ammo
@@ -556,6 +560,7 @@ static int g_merc_run = 0;                                      // ini: [mercena
 static int g_clk_enabled = 1, g_clk_key = VK_SPACE, g_clk_delay = 200, g_clk_interval = 100;
 
 // ---- config --------------------------------------------------------------------------------------------
+#include "default_ini.h"
 static void load_config(ap_config *c) {
     char path[MAX_PATH];
     GetCurrentDirectoryA(MAX_PATH, path);
@@ -563,103 +568,17 @@ static void load_config(ap_config *c) {
     if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) {
         FILE *f = fopen(path, "w");
         if (f) {
-            fputs("; qol settings (changes apply on next game launch)\r\n"
-                  "[qol]\r\n"
-                  "; master switch for everything: 1 = on, 0 = off\r\n"
-                  "enabled=1\r\n"
-                  "; 1 = write qol.log (decisions, errors), 0 = no log file at all\r\n"
-                  "logging=0\r\n"
-                  "\r\n"
-                  "[pickup]\r\n"
-                  "; potion auto-pickup: 1 = on, 0 = off\r\n"
-                  "enabled=1\r\n"
-                  "; pick up potions within this many tiles of the player\r\n"
-                  "range=4\r\n"
-                  "; how often (milliseconds) to look for items to pick up. Higher = less work per second, slower reaction (20 to 2000)\r\n"
-                  "poll_ms=120\r\n"
-                  "; 1 = pick up every rejuvenation potion even if your belt has no room for it (it goes to your inventory)\r\n"
-                  "rejuv_always=1\r\n"
-                  "; 1 = also pick up gold piles within range\r\n"
-                  "gold=1\r\n"
-                  "; 1 = also pick things up while standing in town (0 = no pickups in town)\r\n"
-                  "pickup_in_town=0\r\n"
-                  "\r\n"
-                  "[death]\r\n"
-                  "; 1 = keep your equipment when you die (the \"KeepEquip\" hex edit by SnakeByteStudios, applied in memory). Single player.\r\n"
-                  "; Off by default.\r\n"
-                  "keep_equipment=1\r\n"
-                  "\r\n"
-                  "[experience]\r\n"
-                  "; 1 = no XP penalty for level differences, in either direction: a high-level character still gets full XP from\r\n"
-                  "; low-level monsters, and a low-level character still gets full XP from high-level monsters (e.g. when partied with a\r\n"
-                  "; high-level character). Single player. Off by default.\r\n"
-                  "no_level_penalty=1\r\n"
-                  "\r\n"
-                  "[combat]\r\n"
-                  "; 1 = the chance to hit can reach 100% instead of stopping at 95% (the 5% minimum is unchanged). It is the game's single hit roll, so monsters hitting you\r\n"
-                  "; can also reach 100%. Stock LoD 1.13d only.\r\n"
-                  "hit_cap_100=1\r\n"
-                  "\r\n"
-                  "[monsters]\r\n"
-                  "; 1 = fix the Nightmare Fire Enchanted death explosion: the game cuts it to 2/3 in Nightmare but to 1/8 in Hell, so\r\n"
-                  "; late-Nightmare monsters explode about twice as hard as Hell ones. This makes Nightmare 1/4, so it grows smoothly\r\n"
-                  "; from Normal into Hell. Normal and Hell are unchanged. Stock LoD 1.13d only.\r\n"
-                  "fire_enchanted_fix=1\r\n"
-                  "\r\n"
-                  "[items]\r\n"
-                  "; 1 = quivers and throwing weapons are never used up: arrows and bolts are not subtracted when you shoot, thrown javelins, knives and axes are not subtracted when you throw, and a\r\n"
-                  "; throwing weapon that wears out keeps its whole stack. Applies to every player of a game you host (also on a LAN). Stock LoD 1.13d only.\r\n"
-                  "infinite_ammo=1\r\n"
-                  "\r\n"
-                  "[mercenary]\r\n"
-                  "; 1 = mercenaries run when they follow you instead of always walking (fixes a bug in stock LoD 1.13d).\r\n"
-                  "; Off by default. Only does anything on stock LoD 1.13d.\r\n"
-                  "run=1\r\n"
-                  "; 1 = mercenaries can equip a wider range of items: Rogue: bows, crossbows; Desert: polearms, spears (also Amazon),\r\n"
-                  "; javelins; Iron Wolf: shields, 1H swords, wands, scepters, maces, orbs; Barbarian: swords, axes, maces, hammers,\r\n"
-                  "; Barbarian helms; every merc: rings, amulets, boots, gloves, belts. Replaces BaseMod's [MercMod] options: set\r\n"
-                  "; FullEquip=0, RogueCrossBow=0, RogueAmaBow=0 in BaseMod.ini or this stays off. Stock LoD 1.13d only.\r\n"
-                  "equip=1\r\n"
-                  "\r\n"
-                  "[glow]\r\n"
-                  "; 1 = players get the glowing aura the game shows for a full set of Tal Rasha, Immortal King and the like (cosmetic, no bonuses). Applies to every player of a game you host (also on a LAN). Stock LoD 1.13d only.\r\n"
-                  "enabled=1\r\n"
-                  "; only characters of this level or higher get it (included). 1 = no level needed\r\n"
-                  "min_level=1\r\n"
-                  "; 1 = only characters that have beaten Baal in Hell (the quest data of their save) get the glow; 0 = every character of that level.\r\n"
-                  "hell_baal_required=1\r\n"
-                  "\r\n"
-                  "[maps]\r\n"
-                  "; 1 = wider hallways in the Maggot Lair and the Arcane Sanctuary (map files from qol.mpq, which must sit next to qol.dll).\r\n"
-                  "; Off by default. Takes effect for areas generated after the game starts.\r\n"
-                  "wide_halls=1\r\n"
-                  "\r\n"
-                  "[cpu]\r\n"
-                  "; 1 = stop the game using 100% of a CPU core while idle (the well-known D2 busy-loop bug): its main loops now sleep 1 ms\r\n"
-                  "; instead of spinning. Stock LoD 1.13d only.\r\n"
-                  "fix=1\r\n"
-                  "; 1 = also skip redundant frame drawing when the game is ahead of its 25 fps logic (extra CPU saving; experimental)\r\n"
-                  "throttle_render=0\r\n"
-                  "\r\n"
-                  "[clicker]\r\n"
-                  "; hold a key to repeat left mouse clicks at the current cursor position\r\n"
-                  "enabled=1\r\n"
-                  "; virtual-key code of the hold key (32 = spacebar)\r\n"
-                  "key=32\r\n"
-                  "; key must be held this long (milliseconds) before clicking starts (so typing a space doesn't click)\r\n"
-                  "hold_delay_ms=200\r\n"
-                  "; pause between clicks (milliseconds); 100 = 10 clicks per second\r\n"
-                  "interval_ms=100\r\n", f);
+            fputs(QOL_DEFAULT_INI, f);                                          // the template qol.ini, generated into default_ini.h by build.sh (tools/gen_default_ini.py)
             fclose(f);
         }
     }
     int master = GetPrivateProfileIntA("qol", "enabled", 1, path);
-    g_merc_run = master && GetPrivateProfileIntA("mercenary", "run", 1, path);
-    g_merc_equip = master && GetPrivateProfileIntA("mercenary", "equip", 1, path);
-    g_merc_drop = master && GetPrivateProfileIntA("mercenary", "drop_items", 1, path);
-    g_respec = master && GetPrivateProfileIntA("respec", "enabled", 1, path);
-    g_summons = master && GetPrivateProfileIntA("summons", "enabled", 1, path);
-    g_tz = master && GetPrivateProfileIntA("terrorzone", "enabled", 1, path);
+    g_merc_run = master && GetPrivateProfileIntA("mercenary", "run", 0, path);
+    g_merc_equip = master && GetPrivateProfileIntA("mercenary", "equip", 0, path);
+    g_merc_drop = master && GetPrivateProfileIntA("mercenary", "drop_items", 0, path);
+    g_respec = master && GetPrivateProfileIntA("respec", "enabled", 0, path);
+    g_summons = master && GetPrivateProfileIntA("summons", "enabled", 0, path);
+    g_tz = master && GetPrivateProfileIntA("terrorzone", "enabled", 0, path);
     g_tz_hell_only = GetPrivateProfileIntA("terrorzone", "hell_only", 0, path);
     g_tz_wp_only = GetPrivateProfileIntA("terrorzone", "waypoint_areas_only", 0, path);
     g_tz_dens_pct = GetPrivateProfileIntA("terrorzone", "density_pct", 100, path); if (g_tz_dens_pct < 0) g_tz_dens_pct = 0; if (g_tz_dens_pct > 1000) g_tz_dens_pct = 1000;
@@ -671,7 +590,7 @@ static void load_config(ap_config *c) {
     g_tz_xp = GetPrivateProfileIntA("terrorzone", "xp_pct", 100, path); if (g_tz_xp < 0) g_tz_xp = 0; if (g_tz_xp > 10000) g_tz_xp = 10000;
     g_tz_gold = GetPrivateProfileIntA("terrorzone", "gold_pct", 100, path); if (g_tz_gold < 0) g_tz_gold = 0; if (g_tz_gold > 10000) g_tz_gold = 10000;
     g_tz_minutes = GetPrivateProfileIntA("terrorzone", "rotate_minutes", 60, path); if (g_tz_minutes < 1) g_tz_minutes = 1; if (g_tz_minutes > 1440) g_tz_minutes = 1440;
-    g_dclone = master && GetPrivateProfileIntA("dclone", "enabled", 1, path);
+    g_dclone = master && GetPrivateProfileIntA("dclone", "enabled", 0, path);
     { char b[32];
       GetPrivateProfileStringA("dclone", "roll_minutes", "10", b, sizeof b, path); g_dc_minutes = atof(b); if (g_dc_minutes < 0.1) g_dc_minutes = 0.1; if (g_dc_minutes > 600) g_dc_minutes = 600;
       GetPrivateProfileStringA("dclone", "chance_per_roll", "5", b, sizeof b, path); g_dc_chance = atof(b); if (g_dc_chance < 0) g_dc_chance = 0; if (g_dc_chance > 100) g_dc_chance = 100; }
@@ -680,16 +599,17 @@ static void load_config(ap_config *c) {
     g_glow_baal = GetPrivateProfileIntA("glow", "hell_baal_required", 1, path);
     g_glow_on = master && GetPrivateProfileIntA("glow", "enabled", 0, path);
     g_glow_min = GetPrivateProfileIntA("glow", "min_level", 1, path); if (g_glow_min < 0 || g_glow_min > 99) g_glow_min = 0;
-    g_wide_halls = master && GetPrivateProfileIntA("maps", "wide_halls", 1, path);
-    g_cpu_fix = master && GetPrivateProfileIntA("cpu", "fix", 1, path);
+    g_wide_halls = master && GetPrivateProfileIntA("maps", "wide_halls", 0, path);
+    g_cpu_fix = master && GetPrivateProfileIntA("cpu", "fix", 0, path);
     g_cpu_throttle = g_cpu_fix && GetPrivateProfileIntA("cpu", "throttle_render", 0, path);
-    g_merc_special = master && GetPrivateProfileIntA("mercenary", "whirlwind", 1, path);
-    g_xp_nopenalty = master && GetPrivateProfileIntA("experience", "no_level_penalty", 1, path);
-    g_keep_equip = master && GetPrivateProfileIntA("death", "keep_equipment", 1, path);
-    g_hit100 = master && GetPrivateProfileIntA("combat", "hit_cap_100", 1, path);
-    g_fe_fix = master && GetPrivateProfileIntA("monsters", "fire_enchanted_fix", 1, path);
-    g_infinite_ammo = master && GetPrivateProfileIntA("items", "infinite_ammo", 1, path);
-    c->enabled = master && GetPrivateProfileIntA("pickup", "enabled", 1, path);
+    g_merc_special = master && GetPrivateProfileIntA("mercenary", "whirlwind", 0, path);
+    g_xp_nopenalty = master && GetPrivateProfileIntA("experience", "no_level_penalty", 0, path);
+    g_keep_equip = master && GetPrivateProfileIntA("death", "keep_equipment", 0, path);
+    g_nham = master && GetPrivateProfileIntA("combat", "fix_nham", 0, path);
+    g_hit100 = master && GetPrivateProfileIntA("combat", "hit_cap_100", 0, path);
+    g_fe_fix = master && GetPrivateProfileIntA("monsters", "fire_enchanted_fix", 0, path);
+    g_infinite_ammo = master && GetPrivateProfileIntA("items", "infinite_ammo", 0, path);
+    c->enabled = master && GetPrivateProfileIntA("pickup", "enabled", 0, path);
     c->range = GetPrivateProfileIntA("pickup", "range", 4, path);
     c->rejuv_always = GetPrivateProfileIntA("pickup", "rejuv_always", 1, path);
     c->gold = GetPrivateProfileIntA("pickup", "gold", 1, path);
@@ -697,7 +617,7 @@ static void load_config(ap_config *c) {
     c->poll_ms = GetPrivateProfileIntA("pickup", "poll_ms", 120, path);
     g_logging = GetPrivateProfileIntA("qol", "logging", 0, path);
     c->verbose = g_logging ? 1 : 0;
-    g_clk_enabled = master && GetPrivateProfileIntA("clicker", "enabled", 1, path);
+    g_clk_enabled = master && GetPrivateProfileIntA("clicker", "enabled", 0, path);
     g_clk_key = GetPrivateProfileIntA("clicker", "key", VK_SPACE, path);
     g_clk_delay = GetPrivateProfileIntA("clicker", "hold_delay_ms", 200, path);
     g_clk_interval = GetPrivateProfileIntA("clicker", "interval_ms", 100, path);
@@ -2007,6 +1927,46 @@ static DWORD WINAPI merc_thread(LPVOID arg) {
     return 0;
 }
 
+
+// ---- "next hit always misses" (NHAM) fix: repair a stale frame value after an attack mode starts -----------------------------------------------
+// Found in the nhamdebug logs: right after a hit recovery, SetMode(attack) can leave the unit's frames-remaining field (+0x44) at the game frame x 256 (hundreds of
+// thousands) instead of the small value a normal attack start has (512 for mode 7, 1280 for the sequence mode 18 at the user's speed), and then the attack's timed
+// events never fire. Zeroing that field at the end of the event registration (the first version of this fix) broke Fend, Zeal and Fury, because their rollback computes
+// the repeated hits from the same field. This version leaves every normal start alone: it learns the normal value per (mode, rate), and only when an attack start shows a
+// stale value (more than 256 frames) it writes the learned normal value back, before the events are registered.
+typedef struct { int mode; unsigned rate; DWORD rem; } nh_norm_t;
+static nh_norm_t g_nh_norm[64]; static int g_nh_n; static setmode_t o_nham_setmode; static volatile LONG g_nh_fixed, g_nh_unlearned;
+static int __stdcall h_nham_setmode(DWORD unit, int mode) {
+    int r = o_nham_setmode(unit, mode);
+    if (unit && (mode == 7 || mode == 8 || (mode >= 10 && mode <= 16) || mode == 18) && readable((const void *)unit, 0x50) && *(DWORD *)unit == 0) {
+        DWORD rem = *(DWORD *)(unit + 0x44); unsigned rate = *(unsigned short *)(unit + 0x48); int k = -1;
+        for (int i = 0; i < g_nh_n; i++) if (g_nh_norm[i].mode == mode && g_nh_norm[i].rate == rate) { k = i; break; }
+        if (rem > 0 && rem < 0x10000) { if (k >= 0) g_nh_norm[k].rem = rem; else if (g_nh_n < 64) { g_nh_norm[g_nh_n].mode = mode; g_nh_norm[g_nh_n].rate = rate; g_nh_norm[g_nh_n].rem = rem; g_nh_n++; } }
+        else if (rem >= 0x10000) {
+            if (k < 0) for (int i = 0; i < g_nh_n; i++) if (g_nh_norm[i].mode == mode) k = i;                  // same mode at another speed: the closest we know
+            if (k >= 0) { *(DWORD *)(unit + 0x44) = g_nh_norm[k].rem; LONG n = InterlockedIncrement(&g_nh_fixed); if (n <= 5 || n % 50 == 0) logf_("NHAM fix: stale frame value %lu after attack mode %d repaired to %lu (repair #%ld)", (unsigned long)rem, mode, (unsigned long)g_nh_norm[k].rem, (long)n); }
+            else { LONG n = InterlockedIncrement(&g_nh_unlearned); if (n <= 3) logf_("NHAM fix: stale frame value %lu after attack mode %d but no normal value learned yet", (unsigned long)rem, mode); }
+        }
+    }
+    return r;
+}
+static DWORD WINAPI nham_thread(LPVOID arg) {
+    (void)arg;
+    if (!g_nham) return 0;
+    for (int i = 0; i < 6000; i++) {
+        HMODULE g = GetModuleHandleA("D2Game.dll"), c = GetModuleHandleA("D2Common.dll");
+        if (!g || !c) { Sleep(100); continue; }
+        IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)g + ((IMAGE_DOS_HEADER *)g)->e_lfanew);
+        if (nt->FileHeader.TimeDateStamp != BUGGY_D2GAME_TIMESTAMP) { logf_("NHAM fix: this D2Game build is not supported, not installed"); return 0; }
+        unsigned ord = 0;
+        for (unsigned o = 10000; o < 11200 && !ord; o++) { BYTE *f = (BYTE *)GetProcAddress(c, (LPCSTR)(UINT_PTR)o); if (f && readable(f, 24) && sig_is_setmode(f)) ord = o; }
+        if (!ord) { logf_("NHAM fix: D2Common SetMode not found"); return 0; }
+        logf_("NHAM fix: hook D2Game IAT -> D2Common#%u SetMode: %d", ord, hook_import_ordinal(g, "D2Common.dll", ord, h_nham_setmode, (void **)&o_nham_setmode));
+        return 0;
+    }
+    return 0;
+}
+
 #ifdef MERCDEBUG
 // ---- TEMPORARY diagnostic (build with -DMERCDEBUG; not part of the shipped DLL) -----------------------------------
 // Traces calls D2Game.dll makes into D2Common.dll. Each imported function gets a tiny stub that records the call and
@@ -2171,6 +2131,10 @@ static DWORD WINAPI worker(LPVOID arg) {
     CreateThread(NULL, 0, md_thread, NULL, 0, NULL);
 #endif
     CreateThread(NULL, 0, merc_thread, NULL, 0, NULL);
+    CreateThread(NULL, 0, nham_thread, NULL, 0, NULL);
+#ifdef NHAMDEBUG
+    CreateThread(NULL, 0, nh_thread, NULL, 0, NULL);
+#endif
     CreateThread(NULL, 0, equip_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, summon_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, special_thread, NULL, 0, NULL);
@@ -2202,6 +2166,152 @@ static DWORD WINAPI worker(LPVOID arg) {
     logf_("hook recv (IAT D2Client->D2Net#%u): %d", recv_ord, hook_import_ordinal(client, "D2Net.dll", recv_ord, h_recv, (void **)&o_recv));
     return 0;
 }
+
+
+#ifdef NHAMDEBUG
+// ---- TEMPORARY diagnostic for the "next hit always misses" bug (build with ./build.sh nhamdebug; never shipped) ----------------------------
+// Writes nham.log in the game folder: (1) every D2Common SetMode call on a PLAYER unit (mode before/after, and the unit's frame, frames-remaining and rate fields at
+// +0x40/+0x44/+0x48, which Nefarius says get a game-frame value that breaks the attack events), (2) every run of the server's hit roll (D2Game RVA 0x8B760: result 1 = hit,
+// 0 = miss) that involves a player, with both units' modes. Test: stand next to something that stuns, knocks back or blocks, get interrupted (hit recovery / block / stun),
+// then attack once and note the time. A "miss" with the roll logged = a real miss; NO roll logged after an attack mode = the attack event never fired (NHAM).
+static FILE *nh_log; static volatile LONG nh_lines;
+static void nh_f(const char *fmt, ...) {
+    if (!nh_log || InterlockedIncrement(&nh_lines) > 400000) return;
+    va_list ap; va_start(ap, fmt);
+    fprintf(nh_log, "%9lu ", (unsigned long)GetTickCount()); vfprintf(nh_log, fmt, ap); fputc('\n', nh_log); fflush(nh_log);
+    va_end(ap);
+}
+static setmode_t nh_o_setmode;
+static int __stdcall h_nh_setmode(DWORD unit, int mode) {
+    int ok = unit && readable((const void *)unit, 0x50) && *(DWORD *)unit == 0;
+    long before = ok ? (long)*(DWORD *)(unit + 0xC) : -1;
+    int r = nh_o_setmode(unit, mode);
+    if (ok) nh_f("mode  p%08lx %2ld -> %2d (now %2lu) frame %7ld remain %7ld rate %5u", (unsigned long)unit, before, mode, (unsigned long)*(DWORD *)(unit + 0xC), (long)*(DWORD *)(unit + 0x40), (long)*(DWORD *)(unit + 0x44), (unsigned)*(unsigned short *)(unit + 0x48));
+    return r;
+}
+void *nh_hit_tramp;
+extern void nh_hit_wrap(void);
+__asm__(
+    ".text\n"
+    "_nh_hit_wrap:\n"                    // eax = defender, stdcall(attacker, a2, a3); the original pops 3 args
+    "  pushl %eax\n  pushl 16(%esp)\n  pushl 16(%esp)\n  pushl 16(%esp)\n  movl 12(%esp), %eax\n  call *_nh_hit_tramp\n"
+    "  pushl %eax\n  pushl %ecx\n  pushl %edx\n  pushl 16(%esp)\n  pushl %eax\n  pushl 20(%esp)\n  pushl 32(%esp)\n  call _nh_hit_log\n  addl $16, %esp\n"
+    "  popl %edx\n  popl %ecx\n  popl %eax\n  addl $4, %esp\n  ret $12\n");
+void *nh_chance_back;
+extern void nh_chance_wrap(void);
+__asm__(
+    ".text\n"
+    "_nh_chance_wrap:\n"                  // at D2Game +0x8B8F9 (replaces `mov esi,64h`): ecx = the chance after the 5..cap clamp, ebx = the defender
+    "  pushal\n  pushl %ecx\n  pushl %ebx\n  call _nh_chance_log\n  addl $8, %esp\n  popal\n  movl $100, %esi\n  jmp *_nh_chance_back\n");
+void __cdecl nh_chance_log(DWORD def, DWORD chance) {
+    if (!def || !readable((const void *)def, 0x50)) return;
+    DWORD dt = *(DWORD *)def; if (dt > 1) return;
+    nh_f("chance %s defender class %lu: %lu%% to hit", dt == 0 ? "vs PLAYER, " : "vs monster,", (unsigned long)*(DWORD *)(def + 4), (unsigned long)chance);
+}
+void *nh_calc_back, *nh_calc_floor;
+extern void nh_calc_wrap(void);
+__asm__(
+    ".text\n"
+    "_nh_calc_wrap:\n"                    // at D2Game +0x8B8CC (replaces `cmp eax,5 ; jle floor`): eax = chance before the clamp, ebp = attack rating, edi = AR + defense, [esp+0x1c] / [esp+0x20] = the two levels
+    "  pushal\n  movl 60(%esp), %ecx\n  movl 64(%esp), %edx\n  pushl %edx\n  pushl %ecx\n  pushl %edi\n  pushl %ebp\n  pushl %eax\n  call _nh_calc_log\n  addl $20, %esp\n  popal\n"
+    "  cmpl $5, %eax\n  jg 1f\n  jmp *_nh_calc_floor\n1:\n  jmp *_nh_calc_back\n");
+void __cdecl nh_calc_log(int chance, int ar, int sum, int lvA, int lvB) {
+    nh_f("calc   chance %4d%% (before clamp) = AR %d, defense %d, levels %d / %d", chance, ar, sum - ar, lvA, lvB);
+}
+void *nh_ev_back;
+extern void nh_ev_wrap(void);
+__asm__(
+    ".text\n"
+    "_nh_ev_wrap:\n"                      // entry of D2Game +0x6D150 (registers a unit's animation events): esi = unit, stack arg = game
+    "  pushal\n  pushl 36(%esp)\n  pushl %esi\n  call _nh_ev_log\n  addl $8, %esp\n  popal\n"
+    "  subl $0x18, %esp\n  pushl %ebx\n  pushl %ebp\n  jmp *_nh_ev_back\n");
+void __cdecl nh_ev_log(DWORD unit, DWORD game) {
+    if (!unit || !game || !readable((const void *)unit, 0x50) || !readable((const void *)(game + 0xA8), 4) || *(DWORD *)unit != 0) return;
+    nh_f("events p%08lx registered: unit frame %7ld remain %7ld, game frame %lu (x256 = %lu)", (unsigned long)unit, (long)*(DWORD *)(unit + 0x40), (long)*(DWORD *)(unit + 0x44), (unsigned long)*(DWORD *)(game + 0xA8), (unsigned long)*(DWORD *)(game + 0xA8) << 8);
+}
+void *nh_sret, *nh_search_orig, *nh_cret, *nh_count_orig;
+extern void nh_search_wrap(void); extern void nh_count_wrap(void);
+__asm__(
+    ".text\n"
+    "_nh_search_wrap:\n"                  // replaces the target of `call 6fc37a50` at D2Game +0xDA8F6 (Fend's search for the next target): the game's function takes 4 stack args and cleans them
+    "  popl _nh_sret\n  call *_nh_search_orig\n  pushal\n  pushl %eax\n  call _nh_search_log\n  addl $4, %esp\n  popal\n  jmp *_nh_sret\n"
+    "_nh_count_wrap:\n"                   // replaces the target of `call D2Common #10529` at D2Game +0xDA8C0 (the hits left in this skill's sequence); one stack arg
+    "  popl _nh_cret\n  call *_nh_count_orig\n  pushal\n  pushl %eax\n  call _nh_count_log\n  addl $4, %esp\n  popal\n  jmp *_nh_cret\n");
+void __cdecl nh_search_log(DWORD found) { nh_f("fend: search for the next target %s", found ? "FOUND one" : "found none"); }
+void __cdecl nh_count_log(int n) { nh_f("fend: sequence count after this hit = %d (hits left %d)", n, n - 1); }
+void *nh_atk_back;
+extern void nh_atk_wrap(void);
+__asm__(
+    ".text\n"
+    "_nh_atk_wrap:\n"                     // entry of D2Game +0x8BB80 (the attack function every melee hit goes through): edi = attacker, eax = defender
+    "  pushal\n  pushl 32(%esp)\n  pushl %eax\n  pushl %edi\n  call _nh_atk_log\n  addl $12, %esp\n  popal\n"
+    "  pushl %ebx\n  xorl %ebx, %ebx\n  testl %edi, %edi\n  jmp *_nh_atk_back\n");
+void __cdecl nh_atk_log(DWORD atk, DWORD def, DWORD ret) {
+    if (!atk || !def || !readable((const void *)atk, 0x50) || !readable((const void *)def, 0x50) || *(DWORD *)atk != 0) return;            // player attackers only
+    HMODULE g = GetModuleHandleA("D2Game.dll");
+    nh_f("attack call: player -> %s class %lu, caller D2Game +%lx", *(DWORD *)def == 1 ? "monster" : (*(DWORD *)def == 0 ? "player" : "other"), (unsigned long)*(DWORD *)(def + 4), (unsigned long)(ret - (DWORD)g));
+}
+void __cdecl nh_hit_log(DWORD atk, DWORD def, DWORD res, DWORD ret) {
+    if (!atk || !def || !readable((const void *)atk, 0x50) || !readable((const void *)def, 0x50)) return;
+    DWORD at = *(DWORD *)atk, dt = *(DWORD *)def;
+    if (at != 0 && dt != 0) return;                                           // only rolls with a player on one side
+    nh_f("hit   atk %s %lu (class %lu, mode %2lu)  def %s %lu (class %lu, mode %2lu)  -> %s", at == 0 ? "player" : "monster", (unsigned long)*(DWORD *)(atk + 8), (unsigned long)*(DWORD *)(atk + 4), (unsigned long)*(DWORD *)(atk + 0xC),
+         dt == 0 ? "player" : "monster", (unsigned long)*(DWORD *)(def + 8), (unsigned long)*(DWORD *)(def + 4), (unsigned long)*(DWORD *)(def + 0xC), res ? "HIT" : "MISS");
+    { HMODULE g = GetModuleHandleA("D2Game.dll"); nh_f("  caller D2Game +%lx", (unsigned long)(ret - (DWORD)g)); }
+}
+static DWORD WINAPI nh_thread(LPVOID arg) {
+    (void)arg;
+    nh_log = fopen("nham.log", "w"); if (!nh_log) return 0;
+    nh_f("nham trace started");
+    int did_mode = 0, did_hit = 0;
+    for (int i = 0; i < 12000 && !(did_mode && did_hit); i++) {
+        HMODULE g = GetModuleHandleA("D2Game.dll"), c = GetModuleHandleA("D2Common.dll");
+        if (!g || !c) { Sleep(100); continue; }
+        if (!did_mode) {
+            unsigned ord = 0;
+            for (unsigned o = 10000; o < 11200 && !ord; o++) { BYTE *f = (BYTE *)GetProcAddress(c, (LPCSTR)(UINT_PTR)o); if (f && readable(f, 24) && sig_is_setmode(f)) ord = o; }
+            if (ord) { nh_f("SetMode is D2Common #%u, hook %d", ord, hook_import_ordinal(g, "D2Common.dll", ord, h_nh_setmode, (void **)&nh_o_setmode)); did_mode = 1; }
+        }
+        if (!did_hit) {
+            BYTE *base = (BYTE *)g; IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew); IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
+            for (int k = 0; k < nt->FileHeader.NumberOfSections && !did_hit; k++, sec++) {
+                if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+                BYTE *code = base + sec->VirtualAddress; int patched = 0; long at = sig_find_hit_cap(code, sec->Misc.VirtualSize, &patched);
+                if (at < 0) continue;
+                BYTE *f = code + at; while (f > code && f[-1] != 0xCC) f--;                                 // the function starts after the int3 padding
+                static const BYTE pro[6] = {0x81, 0xEC, 0x14, 0x04, 0x00, 0x00};
+                if (memcmp(f, pro, 6)) { nh_f("hit roll: unexpected prologue at D2Game +%lx", (unsigned long)(f - base)); did_hit = 1; break; }
+                BYTE *tr = (BYTE *)VirtualAlloc(NULL, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE); if (!tr) break;
+                memcpy(tr, f, 6); tr[6] = 0xE9; *(DWORD *)(tr + 7) = (DWORD)((f + 6) - (tr + 11));
+                nh_hit_tramp = tr;
+                BYTE jmp[6] = {0xE9, 0, 0, 0, 0, 0x90}; *(DWORD *)(jmp + 1) = (DWORD)((BYTE *)nh_hit_wrap - (f + 5));
+                patch_bytes(f, jmp, 6); did_hit = 1; nh_f("hit roll hooked at D2Game +%lx", (unsigned long)(f - base));
+                static const BYTE cm[5] = {0xBE, 0x64, 0x00, 0x00, 0x00};                                   // mov esi,64h right before the `div esi` of the roll (function +0x199)
+                if (!memcmp(f + 0x199, cm, 5) && f[0x197] == 0x33 && f[0x198] == 0xD2) {
+                    nh_chance_back = f + 0x199 + 5; BYTE j2[5] = {0xE9, 0, 0, 0, 0}; *(DWORD *)(j2 + 1) = (DWORD)((BYTE *)nh_chance_wrap - (f + 0x199 + 5)); patch_bytes(f + 0x199, j2, 5); nh_f("chance logging hooked at D2Game +%lx", (unsigned long)(f + 0x199 - base));
+                } else nh_f("chance point not found at function +0x199");
+                { BYTE *cm9 = f + 0x16C; static const BYTE cmp9[9] = {0x83, 0xF8, 0x05, 0x0F, 0x8E, 0x87, 0x00, 0x00, 0x00};
+                  if (!memcmp(cm9, cmp9, 9)) { nh_calc_back = cm9 + 9; nh_calc_floor = f + 0x1FC; BYTE j4[9] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90}; *(DWORD *)(j4 + 1) = (DWORD)((BYTE *)nh_calc_wrap - (cm9 + 5)); patch_bytes(cm9, j4, 9); nh_f("calculation logging hooked at D2Game +%lx", (unsigned long)(cm9 - base)); }
+                  else nh_f("calculation point not found at function +0x16c"); }
+                { BYTE *af = base + 0x8BB80; static const BYTE afp[5] = {0x53, 0x33, 0xDB, 0x85, 0xFF};
+                  if (nt->FileHeader.TimeDateStamp == 1318970639u && !memcmp(af, afp, 5)) { nh_atk_back = af + 5; BYTE j5[5] = {0xE9, 0, 0, 0, 0}; *(DWORD *)(j5 + 1) = (DWORD)((BYTE *)nh_atk_wrap - (af + 5)); patch_bytes(af, j5, 5); nh_f("attack function hooked at D2Game +8bb80"); }
+                  else nh_f("attack function not found at +8bb80"); }
+                { BYTE *c1 = base + 0xDA8C0, *c2 = base + 0xDA8F6; static const BYTE sc1[5] = {0xE8, 0x27, 0x00, 0xF3, 0xFF};
+                  if (nt->FileHeader.TimeDateStamp == 1318970639u && !memcmp(c1, sc1, 5) && c2[0] == 0xE8 && *(int *)(c2 + 1) + (int)(c2 + 5) == (int)(base + 0x17A50)) {
+                      nh_count_orig = base + 0xA8EC; nh_search_orig = base + 0x17A50;
+                      DWORD r1 = (DWORD)((BYTE *)nh_count_wrap - (c1 + 5)), r2 = (DWORD)((BYTE *)nh_search_wrap - (c2 + 5));
+                      patch_bytes(c1 + 1, (BYTE *)&r1, 4); patch_bytes(c2 + 1, (BYTE *)&r2, 4); nh_f("fend sequence hooks installed (count at +da8c0, search at +da8f6)"); }
+                  else nh_f("fend sequence hook points not found"); }
+                { BYTE *ev = base + 0x6D150; static const BYTE evp[15] = {0x83, 0xEC, 0x18, 0x53, 0x55, 0x8B, 0x6C, 0x24, 0x24, 0x8B, 0x9D, 0xA8, 0x00, 0x00, 0x00};
+                  if (nt->FileHeader.TimeDateStamp == 1318970639u && !memcmp(ev, evp, 15)) { nh_ev_back = ev + 5; BYTE j3[5] = {0xE9, 0, 0, 0, 0}; *(DWORD *)(j3 + 1) = (DWORD)((BYTE *)nh_ev_wrap - (ev + 5)); patch_bytes(ev, j3, 5); nh_f("event registration hooked at D2Game +6d150"); }
+                  else nh_f("event registration function not found at +6d150"); }
+            }
+        }
+        if (!(did_mode && did_hit)) Sleep(100);
+    }
+    return 0;
+}
+#endif
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID res) {
     (void)res;

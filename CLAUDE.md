@@ -10,6 +10,7 @@ also works with Project Diablo 2 (PD2, under Wine, loaded via D2GL `load_dlls_la
 so there is no anti-cheat concern.
 
 ### User preferences / standing rules (apply to all future work)
+- **Every feature has its own enable setting in qol.ini and is OFF when that key is missing** (the code default is 0; the shipped template and the default ini the DLL writes set the wanted features to 1). Add the key to the template and to the embedded default ini with any new feature.
 - **Never require numeric config values**: everything is learned or read from the game's own files. Settings default to **off** (the pickup and clicker are ON in the template).
 - **Leave game files unmodified** (play with the original DLLs): all code changes happen in memory at runtime, found by byte signature, gated by PE timestamps.
 - **Play nice with BaseMod** (devurandom's BaseMod.dll): never fight its `[MercMod]` replacements; detect and step aside.

@@ -91,12 +91,12 @@ static long sig_find_xp_penalty(const unsigned char *buf, size_t n, int *patched
 
 // The chance-to-hit roll (D2Game, stock 1.13d at +0x8B8CC): `cmp eax,5 ; jle floor ; cmp eax,5Fh ; mov ecx,eax ; jl +5 ; mov ecx,5Fh`, then rand%100 >= ecx is a miss.
 // Changing both 5Fh (95) to 64h (100) lifts the cap to 100% (the 5% floor stays). Returns the offset of the `cmp eax,5Fh` (its imm8 is at +2, the mov's imm32 at +8) if the
-// pattern occurs exactly once, else -1. *patched = 1 if it already says 100.
+// pattern occurs exactly once, else -1. *patched = 1 if it already says 100. (The first 9 bytes may also be `jmp rel32 ; nop x4`: the nhamdebug diagnostic hooks the roll there.)
 static long sig_find_hit_cap(const unsigned char *buf, size_t n, int *patched) {
     long found = -1; int count = 0;
     for (size_t i = 0; i + 21 <= n; i++) {
         const unsigned char *p = buf + i;
-        if (p[0] == 0x83 && p[1] == 0xF8 && p[2] == 0x05 && p[3] == 0x0F && p[4] == 0x8E && p[9] == 0x83 && p[10] == 0xF8 && (p[11] == 0x5F || p[11] == 0x64) &&
+        if (((p[0] == 0x83 && p[1] == 0xF8 && p[2] == 0x05 && p[3] == 0x0F && p[4] == 0x8E) || (p[0] == 0xE9 && p[5] == 0x90 && p[6] == 0x90 && p[7] == 0x90 && p[8] == 0x90)) && p[9] == 0x83 && p[10] == 0xF8 && (p[11] == 0x5F || p[11] == 0x64) &&
             p[12] == 0x8B && p[13] == 0xC8 && p[14] == 0x7C && p[15] == 0x05 && p[16] == 0xB9 && p[17] == p[11] && p[18] == 0 && p[19] == 0 && p[20] == 0) {
             found = (long)(i + 9); count++; if (patched) *patched = p[11] == 0x64;
         }

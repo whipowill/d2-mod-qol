@@ -10,7 +10,7 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 
 - **Auto Click** - hold spacebar for repeated left mouse clicks (works w/ PD2)
 - **Auto Pickup** - potions, scrolls, keys, and gold (works w/ PD2)
-- **Hitcap 100** - attack rating can reach 100% hit chance on monsters
+- **Hitcap 100%** - attack rating can reach 100% hit chance on monsters
 - **NoXP Penalty** - no longer penalized for fighting low lvl monsters, or partying high level friends
 - **Death Keep** - no longer lose your gear when you die
 - **Merc Equip** - mercs can equip various item types consistent w/ their class, including quivers
@@ -29,6 +29,7 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 - **Merc Run** - mercs run when following you instead of walking
 - **NM FE Fix** - fire enchants explode w/ correct damage in Nightmare
 - **CPU Fix** - fixes legacy CPU bug in the original game
+- **NHAM Fix** - fixes legacy "next hit always misses" problem
 
 ## Commands
 
