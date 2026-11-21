@@ -350,11 +350,11 @@ static const char *tz_name(int k) {
     }
     return g_tz_disp[k][0] ? g_tz_disp[k] : g_tz_name[k];
 }
-// The waypoint map a sub-area belongs to (the nearest waypoint area on the way in), used in the announcement: "Crypt (Cold Plains)". Pairs of {area id, waypoint area id} from Levels.txt.
+// The map a sub-area is entered from (usually a waypoint map, but not always: the Pit is in Tamoe Highland), used in the announcement: "Crypt (Burial Grounds)". Pairs of {area id, parent area id}.
 static const short g_tz_wpmap[][2] = {
-    {2,3},{7,6},{8,3},{9,3},{13,3},{17,3},{18,3},{19,3},{10,5},{14,5},{11,6},{15,6},{12,6},{16,6},{21,6},{22,6},{23,6},{24,6},{25,6},
+    {2,3},{7,6},{8,3},{9,3},{13,3},{17,3},{18,17},{19,17},{10,5},{14,5},{11,6},{15,6},{12,7},{16,7},{21,6},{22,6},{23,6},{24,6},{25,6},
     {26,27},{28,27},{30,29},{31,29},{33,32},{34,32},{36,35},{38,4},{39,4},
-    {41,42},{55,42},{59,42},{56,57},{60,57},{45,44},{58,44},{61,44},{62,43},{63,43},{64,43},{65,44},{47,48},{49,48},{51,52},{53,52},{54,52},
+    {41,42},{55,41},{59,41},{56,42},{60,57},{45,44},{58,44},{61,44},{62,43},{63,43},{64,43},{65,44},{47,48},{49,48},{51,52},{53,52},{54,52},
     {66,46},{67,46},{68,46},{69,46},{70,46},{71,46},{72,46},
     {82,81},{84,76},{85,76},{86,77},{87,77},{90,77},{88,78},{89,78},{91,78},{92,80},{93,80},{94,80},{95,80},{96,81},{97,81},{98,81},{99,81},{100,101},
     {104,106},{105,106},
@@ -370,11 +370,16 @@ static const char *tz_label(int k, char *buf, size_t n) {                       
 static volatile LONG g_tz_lock; static long long g_tz_start, g_tz_expire; static int g_tz_cur = -1, g_tz_games, g_tz_loaded; static volatile int g_tz_counted;   // g_tz_counted: the game you are in is already counted in g_tz_games (cleared when you leave the game, and when a new zone is picked)
 #define TZ_MAX_GAMES 1                                                                                // a zone is live for ONE game (not configurable)
 static int tz_spent(void) { return g_tz_games > TZ_MAX_GAMES; }              // the zone has already had its max_games_per_zone games: it is over for you until the next one
+static volatile DWORD g_srv_game;                                                                       // (the server's game, set with the pet code below)
+// Areas a zone must not start in: the Den of Evil (empty once its quest is done).
+static int tz_area_ok(int id, int diff) { (void)diff; return id != 8; }
 static void tz_state_pick(long long now) {                                                            // a new random zone, different from the last one, starting now
     static unsigned s; if (!s) s = GetTickCount() ^ (unsigned)now ^ (GetCurrentProcessId() * 2654435761u);
     s ^= s << 13; s ^= s >> 17; s ^= s << 5; s += (unsigned)now;
     int old = g_tz_cur >= 0 ? g_tz_grp[g_tz_cur] : -1, g = (int)(s % (unsigned)g_tz_ngrp);
     if (g == old && g_tz_ngrp > 1) g = (g + 1 + (int)((s >> 8) % (unsigned)(g_tz_ngrp - 1))) % g_tz_ngrp;
+    { DWORD gm = g_srv_game; int diff = (gm && readable((const void *)gm, 0x80)) ? *(BYTE *)(gm + 0x6D) : 2; if (diff > 2) diff = 2;
+      for (int t = 0; t < g_tz_ngrp && !tz_area_ok(g_tz_id[g_tz_rep[g]], diff); t++) g = (g + 1) % g_tz_ngrp; }       // skip zones that may not exist for this game
     g_tz_cur = g_tz_rep[g]; g_tz_start = now; g_tz_expire = now + (long long)g_tz_minutes * 60;
     g_tz_games = 0; g_tz_counted = 0;                                                                  // picking never counts a game itself (it can run in a hook while a game is still loading, and local_player_id() may still hold the last game's unit): tz_count_game does, once per game
     logf_("terror zone: new zone area %d, lasts %d minutes", g_tz_id[g_tz_cur], g_tz_minutes);
