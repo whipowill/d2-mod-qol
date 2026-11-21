@@ -89,6 +89,36 @@ static long sig_find_xp_penalty(const unsigned char *buf, size_t n, int *patched
     return count == 1 ? found : -1;
 }
 
+// The chance-to-hit roll (D2Game, stock 1.13d at +0x8B8CC): `cmp eax,5 ; jle floor ; cmp eax,5Fh ; mov ecx,eax ; jl +5 ; mov ecx,5Fh`, then rand%100 >= ecx is a miss.
+// Changing both 5Fh (95) to 64h (100) lifts the cap to 100% (the 5% floor stays). Returns the offset of the `cmp eax,5Fh` (its imm8 is at +2, the mov's imm32 at +8) if the
+// pattern occurs exactly once, else -1. *patched = 1 if it already says 100.
+static long sig_find_hit_cap(const unsigned char *buf, size_t n, int *patched) {
+    long found = -1; int count = 0;
+    for (size_t i = 0; i + 21 <= n; i++) {
+        const unsigned char *p = buf + i;
+        if (p[0] == 0x83 && p[1] == 0xF8 && p[2] == 0x05 && p[3] == 0x0F && p[4] == 0x8E && p[9] == 0x83 && p[10] == 0xF8 && (p[11] == 0x5F || p[11] == 0x64) &&
+            p[12] == 0x8B && p[13] == 0xC8 && p[14] == 0x7C && p[15] == 0x05 && p[16] == 0xB9 && p[17] == p[11] && p[18] == 0 && p[19] == 0 && p[20] == 0) {
+            found = (long)(i + 9); count++; if (patched) *patched = p[11] == 0x64;
+        }
+    }
+    return count == 1 ? found : -1;
+}
+
+// The same cap in the interface (D2Client, stock 1.13d): the chance-to-hit calculation of the stats screen (`cmp eax,5Fh ; jle +5 ; mov eax,5Fh`) and the two routines that clamp the
+// value again before drawing it (same shape on ebx and ebp). Exactly three copies of `cmp r,5Fh ; jle +5 ; mov r,5Fh` exist in the stock DLL; the imm8 is at +2, the mov's imm32 at +6.
+// Fills at[] (offsets) and returns 3 only if all three were found; *patched = 1 if they already say 100.
+static int sig_find_hit_cap_client(const unsigned char *buf, size_t n, long at[3], int *patched) {
+    int count = 0;
+    for (size_t i = 0; i + 10 <= n; i++) {
+        const unsigned char *p = buf + i;
+        if (p[0] == 0x83 && (p[1] == 0xF8 || p[1] == 0xFB || p[1] == 0xFD) && (p[2] == 0x5F || p[2] == 0x64) && p[3] == 0x7E && p[4] == 0x05 &&
+            p[5] == (unsigned char)(0xB8 + (p[1] & 7)) && p[6] == p[2] && p[7] == 0 && p[8] == 0 && p[9] == 0) {
+            if (count < 3) at[count] = (long)i; count++; if (patched) *patched = p[2] == 0x64;
+        }
+    }
+    return count == 3 ? 3 : 0;
+}
+
 // "KeepEquip" (SnakeByteStudios): in the player-creation function, `mov edx,[ebp+0C8h]` (6 bytes) is replaced by `jmp <epilogue> ; nop`,
 // which skips the rest of the function. The 45-byte run below is that spot in stock D2Game.dll (the first 6 bytes may already be the jmp).
 // *epilogue receives the offset of the function's epilogue (`pop edi ; pop esi ; mov eax,ebp ; pop ebp ; pop ebx ; add esp,18h ; ret 14h`)

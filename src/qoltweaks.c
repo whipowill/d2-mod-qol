@@ -169,6 +169,7 @@ static int parse_tz_cb(const char *txt, int len) {
         else if (nf > col_nm && nf > col_wp && nf > col_id && f[col_nm][0] && n < TZ_MAX && (g_tz_wp_only ? (f[col_wp][0] && strcmp(f[col_wp], "255")) : (c_den[2] >= 0 && nf > c_den[2] && atoi(f[c_den[2]]) > 0))) {   // any area with monsters in Hell (or only the waypoint areas)
             int id = atoi(f[col_id]);
             if (id == 1 || id == 40 || id == 75 || id == 103 || id == 109) { line++; p = e + 1; continue; }     // the five towns
+            if (id >= 133 && id <= 136) { line++; p = e + 1; continue; }     // the uber areas: Matron's Den, Forgotten Sands, Furnace of Pain (Pandemonium Run 1-3) and Uber Tristram
             if (id == 37 || id == 73 || id == 102 || id == 108 || id == 132) { line++; p = e + 1; continue; }     // the act boss rooms: Andariel (Catacombs 4), Duriel's Lair, Mephisto (Durance 3), Chaos Sanctum, Worldstone Chamber
             g_tz_id[n] = id; snprintf(g_tz_name[n], sizeof g_tz_name[n], "%s", f[col_nm]);
             for (char *q = g_tz_name[n] + strlen(g_tz_name[n]); q > g_tz_name[n] && q[-1] == ' '; ) *--q = 0;       // "Palace Cellar Level 1 " has a trailing space
@@ -349,6 +350,22 @@ static const char *tz_name(int k) {
     }
     return g_tz_disp[k][0] ? g_tz_disp[k] : g_tz_name[k];
 }
+// The waypoint map a sub-area belongs to (the nearest waypoint area on the way in), used in the announcement: "Crypt (Cold Plains)". Pairs of {area id, waypoint area id} from Levels.txt.
+static const short g_tz_wpmap[][2] = {
+    {2,3},{7,6},{8,3},{9,3},{13,3},{17,3},{18,3},{19,3},{10,5},{14,5},{11,6},{15,6},{12,6},{16,6},{21,6},{22,6},{23,6},{24,6},{25,6},
+    {26,27},{28,27},{30,29},{31,29},{33,32},{34,32},{36,35},{38,4},{39,4},
+    {41,42},{55,42},{59,42},{56,57},{60,57},{45,44},{58,44},{61,44},{62,43},{63,43},{64,43},{65,44},{47,48},{49,48},{51,52},{53,52},{54,52},
+    {66,46},{67,46},{68,46},{69,46},{70,46},{71,46},{72,46},
+    {82,81},{84,76},{85,76},{86,77},{87,77},{90,77},{88,78},{89,78},{91,78},{92,80},{93,80},{94,80},{95,80},{96,81},{97,81},{98,81},{99,81},{100,101},
+    {104,106},{105,106},
+    {110,111},{114,113},{116,115},{119,118},{125,111},{126,112},{127,117},{122,123},{124,123},{128,129},{130,129},{131,129}
+};
+static const char *tz_label(int k, char *buf, size_t n) {                                            // the area's name, plus "(waypoint map)" for a sub-area
+    const char *nm = tz_name(k); int id = g_tz_id[k];
+    for (size_t i = 0; i < sizeof g_tz_wpmap / sizeof *g_tz_wpmap; i++) if (g_tz_wpmap[i][0] == id)
+        for (int j = 0; j < g_tz_n; j++) if (g_tz_id[j] == g_tz_wpmap[i][1]) { snprintf(buf, n, "%s (%s)", nm, tz_name(j)); return buf; }
+    snprintf(buf, n, "%s", nm); return buf;
+}
 // A new zone is picked every time you enter a game (and again when rotate_minutes run out while you are still in one). Nothing is saved: closing the game forgets the zone.
 static volatile LONG g_tz_lock; static long long g_tz_start, g_tz_expire; static int g_tz_cur = -1, g_tz_games, g_tz_loaded; static volatile int g_tz_counted;   // g_tz_counted: the game you are in is already counted in g_tz_games (cleared when you leave the game, and when a new zone is picked)
 #define TZ_MAX_GAMES 1                                                                                // a zone is live for ONE game (not configurable)
@@ -414,8 +431,8 @@ static void tz_tick(DWORD now) {
     if (print) {
         static const char *lines[] = { "Heightened terror grips %s...", "A dark presence stirs in %s...", "The shadows deepen over %s...", "Something hungers in %s...", "Dread gathers in %s..." };
         const char *fmt = lines[(unsigned)slot % (sizeof lines / sizeof *lines)];
-        char nb[200]; const char *pc = strstr(fmt, "%s");
-        if (pc) snprintf(nb, sizeof nb, "%.*s%s%s", (int)(pc - fmt), fmt, tz_name(k), pc + 2); else snprintf(nb, sizeof nb, "%s %s", fmt, tz_name(k));
+        char nb[260], lb[120]; const char *pc = strstr(fmt, "%s"); tz_label(k, lb, sizeof lb);
+        if (pc) snprintf(nb, sizeof nb, "%.*s%s%s", (int)(pc - fmt), fmt, lb, pc + 2); else snprintf(nb, sizeof nb, "%s %s", fmt, lb);
         wchar_t m[256]; swprintf(m, 256, L"\xFF" L"c;%hs", nb); print(m, 0); }
 }
 // -- chat commands: .reset stats / .reset skills (also with a leading '/') --
@@ -525,6 +542,7 @@ static int hook_import_ordinal(HMODULE mod, const char *dll, unsigned ord, void 
 
 static int g_keep_equip = 0;                                    // ini: [death] keep_equipment
 static int g_xp_nopenalty = 0;                                  // ini: [experience] no_level_penalty
+static int g_hit100 = 0;                                        // ini: [combat] hit_cap_100
 static int g_fe_fix = 0;                                        // ini: [monsters] fire_enchanted_fix
 static int g_infinite_ammo = 0;                                 // ini: [items] infinite_ammo
 static int g_wide_halls = 0;                                    // ini: [maps] wide_halls
@@ -571,6 +589,11 @@ static void load_config(ap_config *c) {
                   "; low-level monsters, and a low-level character still gets full XP from high-level monsters (e.g. when partied with a\r\n"
                   "; high-level character). Single player. Off by default.\r\n"
                   "no_level_penalty=1\r\n"
+                  "\r\n"
+                  "[combat]\r\n"
+                  "; 1 = the chance to hit can reach 100% instead of stopping at 95% (the 5% minimum is unchanged). It is the game's single hit roll, so monsters hitting you\r\n"
+                  "; can also reach 100%. Stock LoD 1.13d only.\r\n"
+                  "hit_cap_100=1\r\n"
                   "\r\n"
                   "[monsters]\r\n"
                   "; 1 = fix the Nightmare Fire Enchanted death explosion: the game cuts it to 2/3 in Nightmare but to 1/8 in Hell, so\r\n"
@@ -658,6 +681,7 @@ static void load_config(ap_config *c) {
     g_merc_special = master && GetPrivateProfileIntA("mercenary", "whirlwind", 1, path);
     g_xp_nopenalty = master && GetPrivateProfileIntA("experience", "no_level_penalty", 1, path);
     g_keep_equip = master && GetPrivateProfileIntA("death", "keep_equipment", 1, path);
+    g_hit100 = master && GetPrivateProfileIntA("combat", "hit_cap_100", 1, path);
     g_fe_fix = master && GetPrivateProfileIntA("monsters", "fire_enchanted_fix", 1, path);
     g_infinite_ammo = master && GetPrivateProfileIntA("items", "infinite_ammo", 1, path);
     c->enabled = master && GetPrivateProfileIntA("pickup", "enabled", 1, path);
@@ -737,14 +761,32 @@ static void patch_bytes(BYTE *at, const BYTE *src, int n) {
 }
 static DWORD WINAPI patch_thread(LPVOID arg) {
     (void)arg;
-    if (!g_xp_nopenalty && !g_keep_equip && !g_fe_fix && !g_infinite_ammo) return 0;
+    if (!g_xp_nopenalty && !g_keep_equip && !g_fe_fix && !g_infinite_ammo && !g_hit100) return 0;
+    if (g_hit100) {                                        // the stats screen shows the same cap: D2Client is loaded at startup
+        int done = 0;
+        for (int i = 0; i < 300 && !done; i++) {
+            HMODULE c = GetModuleHandleA("D2Client.dll"); if (!c) { Sleep(100); continue; }
+            BYTE *cb = (BYTE *)c; IMAGE_NT_HEADERS *cn = (IMAGE_NT_HEADERS *)(cb + ((IMAGE_DOS_HEADER *)cb)->e_lfanew); IMAGE_SECTION_HEADER *cs = IMAGE_FIRST_SECTION(cn);
+            for (int k = 0; k < cn->FileHeader.NumberOfSections && !done; k++, cs++) {
+                if (!(cs->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+                BYTE *code = cb + cs->VirtualAddress; long at[3]; int patched = 0;
+                if (sig_find_hit_cap_client(code, cs->Misc.VirtualSize, at, &patched)) {
+                    done = 1;
+                    if (patched) logf_("hit cap 100: D2Client already has the edit");
+                    else { static const BYTE cap = 100; static const BYTE cap32[4] = {100, 0, 0, 0}; for (int j = 0; j < 3; j++) { patch_bytes(code + at[j] + 2, &cap, 1); patch_bytes(code + at[j] + 6, cap32, 4); } logf_("hit cap 100: patched D2Client (stats screen / tooltip cap 95 -> 100, 3 places)"); }
+                }
+            }
+            if (!done) break;
+        }
+        if (!done) logf_("hit cap 100: the interface code was not found in this D2Client (or does not appear exactly three times); the stats screen keeps showing 95");
+    }
     for (int i = 0; i < 6000; i++) {                       // D2Game.dll loads when a game is started
         HMODULE g = GetModuleHandleA("D2Game.dll");
         if (!g) { Sleep(100); continue; }
         BYTE *base = (BYTE *)g;
         IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
         IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
-        int xp_done = !g_xp_nopenalty, keep_done = !g_keep_equip, fe_done = !g_fe_fix, use_done = !g_infinite_ammo, brk_done = !g_infinite_ammo;
+        int xp_done = !g_xp_nopenalty, keep_done = !g_keep_equip, fe_done = !g_fe_fix, use_done = !g_infinite_ammo, brk_done = !g_infinite_ammo, hit_done = !g_hit100;
         for (int k = 0; k < nt->FileHeader.NumberOfSections; k++, sec++) {
             if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
             BYTE *code = base + sec->VirtualAddress; size_t len = sec->Misc.VirtualSize; int patched = 0;
@@ -786,6 +828,14 @@ static DWORD WINAPI patch_thread(LPVOID arg) {
                     else { static const BYTE zero = 0x00, nop = 0x90; patch_bytes(code + at + 2, &zero, 1); patch_bytes(code + at + 11, &nop, 1); logf_("infinite ammo: patched throwing-weapon breakage (D2Game +%lx)", (unsigned long)(code + at - base)); }
                 }
             }
+            if (!hit_done) {                                                    // chance to hit: the 95 cap becomes 100
+                long at = sig_find_hit_cap(code, len, &patched);
+                if (at >= 0) {
+                    hit_done = 1;
+                    if (patched) logf_("hit cap 100: D2Game already has the edit (+%lx)", (unsigned long)(code + at - base));
+                    else { static const BYTE cap = 100; static const BYTE cap32[4] = {100, 0, 0, 0}; patch_bytes(code + at + 2, &cap, 1); patch_bytes(code + at + 8, cap32, 4); logf_("hit cap 100: patched D2Game +%lx (chance to hit cap 95 -> 100)", (unsigned long)(code + at - base)); }
+                }
+            }
             if (!fe_done) {
                 long at = sig_find_fe_nightmare(code, len, &patched);
                 if (at >= 0) {
@@ -797,6 +847,7 @@ static DWORD WINAPI patch_thread(LPVOID arg) {
         }
         if (!use_done) logf_("infinite ammo: the ammo-use code was not found in this D2Game (or appears more than once); not patched");
         if (!brk_done) logf_("infinite ammo: the throwing-weapon breakage code was not found in this D2Game (or appears more than once); not patched");
+        if (!hit_done) logf_("hit cap 100: the chance-to-hit code was not found in this D2Game (or appears more than once); not patched");
         if (!fe_done) logf_("fire enchanted fix: the explosion code was not found in this D2Game (or appears more than once); not patched");
         if (!xp_done) logf_("no XP level penalty: the level-difference code was not found in this D2Game (or appears more than once); not patched");
         if (!keep_done) logf_("keep equipment: the player-creation code was not found in this D2Game (or appears more than once); not patched");

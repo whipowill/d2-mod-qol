@@ -10,7 +10,7 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 
 - **Auto Click** - hold spacebar for repeated left mouse clicks (works w/ PD2)
 - **Auto Pickup** - potions, scrolls, keys, and gold (works w/ PD2)
-- **Free Respec** - reset your stats or your skills on demand
+- **Hitcap 100** - attack rating can reach 100% hit chance on monsters
 - **NoXP Penalty** - no longer penalized for fighting low lvl monsters, or partying high level friends
 - **Death Keep** - no longer lose your gear when you die
 - **Merc Equip** - mercs can equip various item types consistent w/ their class, including quivers
@@ -22,6 +22,7 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 - **Achievement Aura** - bask in the glow of your achievement with Hell completion aura
 - **Random DClone** - stay on your toes w/ randomized DClone spawns as you play
 - **Terror Zones** - random zones will double gold, XP, MF, and monster density
+- **Free Respec** - reset your stats or your skills on demand
 
 ### Bug Fixes
 
