@@ -349,36 +349,18 @@ static const char *tz_name(int k) {
     }
     return g_tz_disp[k][0] ? g_tz_disp[k] : g_tz_name[k];
 }
-// The zone lasts rotate_minutes from the moment it was picked and is remembered in a small text file, so quitting and starting a new game does NOT roll a new one: the same zone continues until its
-// time runs out (it counts real time, also while the game is closed). File qol_terrorzone.txt in the game folder, one line:  <unix time the zone began> <area id> <games entered during it>
-// A missing or unreadable file, an area that is not a candidate any more, or a start time more than 5 minutes in the future just means "pick a new zone". (It is a plain text file: anyone can delete or
-// edit it, or change the system clock; this only stops the casual quit-and-reroll.)
-#define TZ_FILE "qol_terrorzone.txt"
-static volatile LONG g_tz_lock; static long long g_tz_start, g_tz_expire; static int g_tz_cur = -1, g_tz_games, g_tz_loaded; static volatile int g_tz_entering;   // g_tz_entering: tz_game_entered is picking
+// A new zone is picked every time you enter a game (and again when rotate_minutes run out while you are still in one). Nothing is saved: closing the game forgets the zone.
+static volatile LONG g_tz_lock; static long long g_tz_start, g_tz_expire; static int g_tz_cur = -1, g_tz_games, g_tz_loaded; static volatile int g_tz_counted;   // g_tz_counted: the game you are in is already counted in g_tz_games (cleared when you leave the game, and when a new zone is picked)
 #define TZ_MAX_GAMES 1                                                                                // a zone is live for ONE game (not configurable)
 static int tz_spent(void) { return g_tz_games > TZ_MAX_GAMES; }              // the zone has already had its max_games_per_zone games: it is over for you until the next one
-static void tz_state_save(void) {
-    if (g_tz_cur < 0) return;
-    FILE *f = fopen(TZ_FILE, "w"); if (!f) return;
-    fprintf(f, "%lld %d %d\n", g_tz_start, g_tz_id[g_tz_cur], g_tz_games); fclose(f);
-}
 static void tz_state_pick(long long now) {                                                            // a new random zone, different from the last one, starting now
     static unsigned s; if (!s) s = GetTickCount() ^ (unsigned)now ^ (GetCurrentProcessId() * 2654435761u);
     s ^= s << 13; s ^= s >> 17; s ^= s << 5; s += (unsigned)now;
     int old = g_tz_cur >= 0 ? g_tz_grp[g_tz_cur] : -1, g = (int)(s % (unsigned)g_tz_ngrp);
     if (g == old && g_tz_ngrp > 1) g = (g + 1 + (int)((s >> 8) % (unsigned)(g_tz_ngrp - 1))) % g_tz_ngrp;
     g_tz_cur = g_tz_rep[g]; g_tz_start = now; g_tz_expire = now + (long long)g_tz_minutes * 60;
-    g_tz_games = (!g_tz_entering && local_player_id()) ? 1 : 0;                                         // a zone that starts while you are playing counts that game as its first
-    tz_state_save();
+    g_tz_games = 0; g_tz_counted = 0;                                                                  // picking never counts a game itself (it can run in a hook while a game is still loading, and local_player_id() may still hold the last game's unit): tz_count_game does, once per game
     logf_("terror zone: new zone area %d, lasts %d minutes", g_tz_id[g_tz_cur], g_tz_minutes);
-}
-static void tz_state_load(long long now) {
-    g_tz_loaded = 1;
-    FILE *f = fopen(TZ_FILE, "r"); if (!f) return;
-    long long st = 0; int id = 0, games = 0; int n = fscanf(f, "%lld %d %d", &st, &id, &games); fclose(f);
-    if (n < 2 || st <= 0 || st > now + 300 || now >= st + (long long)g_tz_minutes * 60) return;       // unreadable, from the future, or already over
-    for (int i = 0; i < g_tz_n; i++) if (g_tz_id[i] == id) { g_tz_cur = g_tz_rep[g_tz_grp[i]]; g_tz_start = st; g_tz_expire = st + (long long)g_tz_minutes * 60; g_tz_games = games < 0 ? 0 : games;
-        logf_("terror zone: continuing zone area %d from the saved file (%lld s left, %d games so far)", id, g_tz_expire - now, g_tz_games); return; }
 }
 static int tz_index_for(long long unused) {                                                           // the current zone (the first area of it); picks a new one when none is saved or its time is over
     (void)unused;
@@ -386,16 +368,20 @@ static int tz_index_for(long long unused) {                                     
     long long now = (long long)time(NULL);
     if (g_tz_loaded && g_tz_cur >= 0 && now < g_tz_expire && now >= g_tz_start - 300) return g_tz_cur;   // the common case: no lock, no file
     while (InterlockedCompareExchange(&g_tz_lock, 1, 0)) Sleep(0);
-    if (!g_tz_loaded) tz_state_load(now);
+    g_tz_loaded = 1;
     if (g_tz_cur < 0 || now >= g_tz_expire || now < g_tz_start - 300) tz_state_pick(now);
     InterlockedExchange(&g_tz_lock, 0);
     return g_tz_cur;
 }
-static void tz_game_entered(void) {                                                                   // counts a game in the file (and starts a new zone first if the old one is over)
-    g_tz_entering = 1; tz_index_for(0); g_tz_entering = 0;
+static void tz_count_game(const char *why) {                                                          // counts the game you are in, ONCE (a second call for the same game does nothing)
     while (InterlockedCompareExchange(&g_tz_lock, 1, 0)) Sleep(0);
-    g_tz_games++; tz_state_save();
+    if (g_tz_cur >= 0 && !g_tz_counted) { g_tz_counted = 1; g_tz_games++; logf_("terror zone: game counted (%d for zone area %d, %s)", g_tz_games, g_tz_id[g_tz_cur], why); }
     InterlockedExchange(&g_tz_lock, 0);
+}
+static volatile DWORD g_srv_player, g_srv_game;                                                         // (defined again below with the pet code: the server's player unit and game)
+static void tz_game_entered(const char *why) {                                                      // you entered a game: always a new zone, then count the game
+    if (g_tz_ngrp > 0) { while (InterlockedCompareExchange(&g_tz_lock, 1, 0)) Sleep(0); g_tz_loaded = 1; tz_state_pick((long long)time(NULL)); InterlockedExchange(&g_tz_lock, 0); }
+    tz_count_game(why);
 }
 static void tz_tick(DWORD now) {
     tz_apply_level();                                                                                    // keeps the zone's area level in step with the clock (every frame is cheap: it only acts on a change)
@@ -406,9 +392,16 @@ static void tz_tick(DWORD now) {
         if (cl) { IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)cl + ((IMAGE_DOS_HEADER *)cl)->e_lfanew);
             if (nt->FileHeader.TimeDateStamp == 1318970890u) print = (void (__stdcall *)(const wchar_t *, int))((BYTE *)cl + 0x75EB0); else logf_("terror zone: this D2Client build is not supported; the zone is only logged"); } }
     DWORD me = local_player_id();
-    if (!me) { last_player = 0; return; }
-    if (me != last_player) { last_player = me; tz_game_entered(); announce_at = now + 4000; last_slot = -1; }      // entering a game: counted in the file; the zone only changes when its time is over; announce it once the screen is up
-    tz_index_for(0); long long slot = g_tz_start;                                                      // the zone's start time identifies it: a new one is announced when it changes
+    if (!me) { last_player = 0; g_tz_counted = 0; return; }                                           // out of the game: the next game is a new one
+    // A new game is seen two ways: you were out of any game since the last tick (above), or the server's game and player pointers changed without that (a quick quit-and-create, or the player
+    // pointer never reading 0). The second is ignored for 20 s after a count so the pointers settling while a game loads cannot count the same game twice.
+    static DWORD last_sg, last_sp, counted_at; DWORD sg = g_srv_game, sp = g_srv_player; const char *why = "entered a game";
+    int fresh = (me != last_player);
+    if (!fresh && g_tz_counted && sg && sp && last_sg && last_sp && (sg != last_sg || sp != last_sp) && (int)(now - counted_at) > 20000) { fresh = 1; why = "a different game (the server's pointers changed)"; g_tz_counted = 0; }
+    if (sg && sp) { last_sg = sg; last_sp = sp; }
+    if (fresh) { last_player = me; tz_game_entered(why); counted_at = now; announce_at = now + 4000; last_slot = -1; }      // entering a game: counted in the file; the zone only changes when its time is over; announce it once the screen is up
+    tz_index_for(0); tz_count_game("zone began during this game"); long long slot = g_tz_start;       // a zone that begins while you are playing counts this game as its first (once)
+    // the zone's start time identifies it: a new one is announced when it changes
     if (slot == last_slot || (int)(now - announce_at) < 0) return;
     if (tz_spent()) { last_slot = slot; logf_("terror zone: the zone (area %d) has had its game; nothing is announced until the next zone", g_tz_id[tz_index_for(0)]); return; }     // spent: stay silent
     if (!tz_active()) return;                                                                        // hell_only and this is not Hell: no zone (checked again at the next slot / next game)

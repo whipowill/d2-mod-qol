@@ -16,7 +16,7 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 - **Merc Equip** - mercs can equip various item types consistent w/ their class, including quivers
 - **Merc Drop** - mercs will drop their gear if you hire a new one
 - **Merc Whirl** - mercs can use Whirlwind-style attacks properly, if they have that skill
-- **Zookeeper** - the minions you had when you logged out will auto respawn
+- **Zoo Keeper** - the minions you had when you logged out will auto respawn
 - **Wide Hallways** - Maggot Lair and Arcane Sanctuary now have wider hallways
 - **Infinite Ammo** - quivers and throwing weapons no longer consume ammo
 - **Achievement Aura** - bask in the glow of your achievement with Hell completion aura
