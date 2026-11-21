@@ -37,10 +37,9 @@ These commands only work if ``cheats`` are turned on in the config file:
 
 - ``.god`` - make yourself invulnerable for fun
 - ``.xp on|off`` - control when you gain XP if you want to
-- ``.density 10`` - play custom density settings on the fly
+- ``.density 10`` - play custom monster density settings on the fly
+- ``.reset skills|stats`` - reset your skills and stats on demand
 - ``.dclone`` - force Diablo to walk the Earth
-- ``.reset skills`` - reset your skills
-- ``.reset stats`` - reset your stats
 
 ## Install
 

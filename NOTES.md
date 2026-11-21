@@ -415,3 +415,6 @@ Cheat replies wait 400 ms (`g_cmsg_at`) before they are printed so that they app
 The `.dclone now` command (spawn him next to you) was removed on 2026-11-21; only `.dclone` (start the event: announcement, he replaces the next super unique) remains. The now-unused `dclone_spawn` function was deleted.
 `[horde] density` now defaults to 1.5 (template and code) when the key is missing. `[horde] enabled` is still off by default.
 
+## Crash at game start in `spawn_sync` (2026-11-21, D2261121.txt 13:27:27)
+`ACCESS_VIOLATION` at qol.dll RVA 0x7BC5 (`mov [ebx+0x2b8], edx`, ebx = 0x00130000): a WRITE into a spawn structure pointer that passed `readable()` but pointed at read-only memory (the game pointer was probably stale or the array not built yet when the new game started; `[horde] enabled=1` made `spawn_sync` run from the first tick). It was not the CubeMain edit (CubeMain.txt checked: CRLF only, every row has the header's 105 columns). Hardening: `mem_writable` (VirtualQuery over the whole 0x2E4 bytes, committed and writable), the local player must exist and the game struct be readable, and an already-synced structure is only written if its density is still the value we wrote or the original (else it is skipped as freed / reused).
+

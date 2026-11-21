@@ -1575,18 +1575,29 @@ static int tz_apply_member(tzm_t *m, int ci, int diff, BYTE *(__stdcall *get_rec
 // (record +0x16 + 2 x difficulty -> struct +0x2DC and +0x2E0) into it. The pointers sit in the game: level k at game + 0xF0 + 4 x k. Changing the Levels.txt record afterwards (what the terror zone did) therefore
 // changes nothing; the structures have to be changed. spawn_sync keeps the original values of each candidate area (verified against Levels.txt before the first change) and writes the wanted ones: the terror
 // zone's areas get density_pct / elite_pct and the level bonus, every area gets the .density percentage (the larger of the two for the zone). Rooms already generated keep their monsters.
-typedef struct { int saved; DWORD den; BYTE umin, umax; int l1, l2; } sp_orig_t;
+typedef struct { int saved; DWORD den; BYTE umin, umax; int l1, l2; DWORD set_den; BYTE set_min, set_max; int set_l1; } sp_orig_t;
+static int mem_writable(const void *p, size_t n) {                                                       // committed, writable memory for the whole range (a plain readable() check also passes for read-only pages)
+    MEMORY_BASIC_INFORMATION mbi; const BYTE *a = (const BYTE *)p, *end = a + n;
+    while (a < end) {
+        if (!VirtualQuery(a, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+            !(mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) return 0;
+        a = (const BYTE *)mbi.BaseAddress + mbi.RegionSize;
+    }
+    return 1;
+}
 static sp_orig_t g_sp[256]; static DWORD g_sp_game; static volatile int g_world_pct;
 static void spawn_sync(DWORD game, int diff, int want, int wp) {
+    if (!game || !local_player_id() || !readable((const void *)(game + 0xF0), 0x400)) return;                  // no live game yet (or a stale pointer after leaving one)
     if (g_sp_game != game) { memset(g_sp, 0, sizeof g_sp); g_sp_game = game; }
     int done = 0, mism = 0, changed = 0;
     for (int ci = 0; ci < g_tz_n; ci++) {
         int id = g_tz_id[ci]; if (id < 1 || id > 255 || !readable((const void *)(game + 0xF0 + 4 * (DWORD)id), 4)) continue;
-        DWORD si = *(DWORD *)(game + 0xF0 + 4 * (DWORD)id); if (!si || !readable((const void *)si, 0x2E4)) continue;
+        DWORD si = *(DWORD *)(game + 0xF0 + 4 * (DWORD)id); if (!si || (si & 3) || !mem_writable((const void *)si, 0x2E4)) continue;
         sp_orig_t *o = &g_sp[id];
         if (!o->saved) {
             if (g_tz_den[ci][diff] < 0 || *(DWORD *)(si + 0x2B8) != (DWORD)g_tz_den[ci][diff]) { mism++; if (mism <= 3) logf_("spawn: area %d density in the game's spawn structure is %lu, Levels.txt says %d: left alone", id, (unsigned long)*(DWORD *)(si + 0x2B8), g_tz_den[ci][diff]); continue; }
             o->den = *(DWORD *)(si + 0x2B8); o->umin = *(BYTE *)(si + 0x2BC); o->umax = *(BYTE *)(si + 0x2BD); o->l1 = *(int *)(si + 0x2DC); o->l2 = *(int *)(si + 0x2E0); o->saved = 1; }
+        if (o->set_den && (*(DWORD *)(si + 0x2B8) != o->set_den && *(DWORD *)(si + 0x2B8) != o->den)) { mism++; continue; }      // not what we last wrote or the original: the structure was freed or reused, leave it alone
         int inzone = want >= 0 && g_tz_grp[ci] == want;
         int dp = inzone && g_tz_dens_pct > wp ? g_tz_dens_pct : wp, ep = inzone && g_tz_elite_pct > wp ? g_tz_elite_pct : wp;
         DWORD nd = (DWORD)(((unsigned long long)o->den * (100u + (unsigned)dp) + 50) / 100);
@@ -1597,6 +1608,7 @@ static void spawn_sync(DWORD game, int diff, int want, int wp) {
             int nl = o->l2 + g_tz_lvl_bonus; if (diff == 2 && nl < g_tz_lvl_min) nl = g_tz_lvl_min; if (nl > (diff == 2 ? g_tz_lvl_max : 99)) nl = diff == 2 ? g_tz_lvl_max : 99; if (nl < o->l2) nl = o->l2; l1 = l2 = nl; }
         if (*(DWORD *)(si + 0x2B8) != nd || *(BYTE *)(si + 0x2BC) != nmn || *(BYTE *)(si + 0x2BD) != nmx || *(int *)(si + 0x2DC) != l1) changed++;
         *(DWORD *)(si + 0x2B8) = nd; *(BYTE *)(si + 0x2BC) = (BYTE)nmn; *(BYTE *)(si + 0x2BD) = (BYTE)nmx; *(int *)(si + 0x2DC) = l1; *(int *)(si + 0x2E0) = l2;
+        o->set_den = nd; o->set_min = (BYTE)nmn; o->set_max = (BYTE)nmx; o->set_l1 = l1;
         if (inzone) logf_("spawn: zone area %d: density %lu -> %lu, elite packs %d-%d -> %d-%d, monster level %d -> %d", id, (unsigned long)o->den, (unsigned long)nd, o->umin, o->umax, nmn, nmx, o->l2, l2);
         done++;
     }
