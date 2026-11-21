@@ -24,6 +24,10 @@ static int g_dclone = 0, g_dc_diff[3]; static double g_dc_chance = 0, g_dc_minut
 static int g_dc_announce = 1;                                      // ini: [dclone] announce
 static volatile int g_dc_pending;                                  // 1 = the next super unique the game creates becomes Diablo Clone (read by the stub in D2Game)
 static volatile int g_dc_class;                                    // MonStats class id of "diabloclone" (0 = not found yet)
+static int g_horde = 0; static double g_horde_n = 1.0;               // ini: [horde] enabled / density: a standing density rule (no chat output)
+static int g_cheats = 0;                                         // ini: [cheats] enabled (.density N)
+static volatile int g_world_pct;                                 // .density N as a percentage over normal ((N-1) x 100); used by tz_apply_level
+static double g_cmd_density = 0; static int g_cmd_arg = -1; static char g_cmsg[120]; static volatile int g_cmsg_new; static volatile DWORD g_cmsg_at;    // the .density command: its value, the chat reply for the client thread, and a request to re-apply the zone
 static int g_respec = 0;                                         // ini: [respec] enabled
 static int g_summons = 0;                                        // ini: [summons] enabled
 static int g_glow_baal = 1;                                      // ini: [glow] hell_baal_required
@@ -228,8 +232,8 @@ static void misc_tick(void) {
     if (!g_merc_equip) done_it = 1;
     if (!g_glow_on) done_st = 1;
     if (!g_summons) done_sk = done_pm = 1;
-    if (!g_dclone) done_dc = 1;
-    if (!g_tz) done_tz = 1;
+    if (!g_dclone && !g_cheats) done_dc = 1;
+    if (!g_tz && !g_horde && !g_cheats) done_tz = 1;
     if ((done_misc && done_mon && done_it && done_sk && done_pm && done_st && done_dc && done_tz) || tries >= 30) return;
     DWORD now = GetTickCount();
     if ((int)(now - next) < 0) return;
@@ -408,6 +412,17 @@ static void tz_game_entered(const char *why) {                                  
     if (g_tz_ngrp > 0) { while (InterlockedCompareExchange(&g_tz_lock, 1, 0)) Sleep(0); g_tz_loaded = 1; tz_state_pick((long long)time(NULL)); InterlockedExchange(&g_tz_lock, 0); }
     tz_count_game(why);
 }
+static void (__stdcall *client_print(void))(const wchar_t *, int) {                                      // the client's own chat-line function (D2Client +0x75EB0, stock 1.13d), or NULL
+    static void (__stdcall *pr)(const wchar_t *, int); static int tried; if (tried) return pr; tried = 1;
+    HMODULE cl = GetModuleHandleA("D2Client.dll");
+    if (cl) { IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)cl + ((IMAGE_DOS_HEADER *)cl)->e_lfanew); if (nt->FileHeader.TimeDateStamp == 1318970890u) pr = (void (__stdcall *)(const wchar_t *, int))((BYTE *)cl + 0x75EB0); }
+    return pr;
+}
+static void msg_tick(void) {                                                                              // the reply to a cheat command, in ORANGE (the terror zone announcements stay purple)
+    if (!g_cmsg_new || !local_player_id() || GetTickCount() - g_cmsg_at < 400) return;                      // wait for the game to echo the typed command first
+    void (__stdcall *pr)(const wchar_t *, int) = client_print(); if (!pr) return;
+    wchar_t m[200]; swprintf(m, 200, L"\xFF" L"c8%hs", g_cmsg); g_cmsg_new = 0; pr(m, 0);
+}
 static void tz_tick(DWORD now) {
     tz_apply_level();                                                                                    // keeps the zone's area level in step with the clock (every frame is cheap: it only acts on a change)
     static DWORD next, announce_at, last_player; static long long last_slot = -1; static void (__stdcall *print)(const wchar_t *, int); static int tried;
@@ -455,7 +470,9 @@ static int respec_parse(const unsigned char *b, int size) {                  // 
         if (!strcmp(t, "reset stats")) return 1;
         if (!strcmp(t, "reset skills")) return 2;
         if (!strcmp(t, "dclone")) return 3;
-        if (!strcmp(t, "dclone now")) return 4;
+        if (!strncmp(t, "density", 7) && (t[7] == 0 || t[7] == ' ')) { g_cmd_density = t[7] ? atof(t + 8) : -1; return 5; }
+        if (!strncmp(t, "god", 3) && (t[3] == 0 || t[3] == ' ')) { g_cmd_arg = !t[3] ? -1 : !strcmp(t + 4, "on") ? 1 : !strcmp(t + 4, "off") ? 0 : -1; return 6; }   // .god, .god on, .god off
+        if (!strncmp(t, "xp", 2) && (t[2] == 0 || t[2] == ' ')) { g_cmd_arg = !t[2] ? -1 : !strcmp(t + 3, "on") ? 1 : !strcmp(t + 3, "off") ? 0 : !strcmp(t + 3, "status") ? 2 : -1; return 7; }   // .xp (toggles), .xp on, .xp off, .xp status   // .density N (1 = normal, 5 = five times) or .density alone (shows the current setting)
         return 0;
     }
     return 0;
@@ -491,7 +508,7 @@ static int __stdcall h_recv(void *buf, int cap) {
     }
     misc_tick();
     DWORD now = GetTickCount();
-    tz_tick(now);
+    tz_tick(now); msg_tick();
     if (g_summons) sum_step(now);
     if (g_dm_active_flag) dm_step(now);
     // The live position read walks several game structures; only do it when summons need it every packet, or when a
@@ -576,7 +593,11 @@ static void load_config(ap_config *c) {
     g_merc_run = master && GetPrivateProfileIntA("mercenary", "run", 0, path);
     g_merc_equip = master && GetPrivateProfileIntA("mercenary", "equip", 0, path);
     g_merc_drop = master && GetPrivateProfileIntA("mercenary", "drop_items", 0, path);
-    g_respec = master && GetPrivateProfileIntA("respec", "enabled", 0, path);
+    g_horde = master && GetPrivateProfileIntA("horde", "enabled", 0, path);
+    { char b[32]; GetPrivateProfileStringA("horde", "density", "1.5", b, sizeof b, path); g_horde_n = atof(b); if (g_horde_n < 1) g_horde_n = 1; if (g_horde_n > 10) g_horde_n = 10; }
+    g_world_pct = g_horde ? (int)((g_horde_n - 1.0) * 100.0 + 0.5) : 0;
+    g_cheats = master && GetPrivateProfileIntA("cheats", "enabled", 1, path);
+    g_respec = master && g_cheats;                                                                 // .reset stats / skills are cheat commands now
     g_summons = master && GetPrivateProfileIntA("summons", "enabled", 0, path);
     g_tz = master && GetPrivateProfileIntA("terrorzone", "enabled", 0, path);
     g_tz_hell_only = GetPrivateProfileIntA("terrorzone", "hell_only", 0, path);
@@ -1284,30 +1305,6 @@ static void glow_apply(DWORD player) {
 // (row 333 in a stock table). The game's own stats then come from that row's Normal / Nightmare / Hell columns. The player's room1 is *(*(unit+0x2c)+0x1c),
 // the position two words of the path (+2 x, +6 y); the level number is room1 +0x10 -> room2 +0x58 -> level +0x1d0 (towns are skipped). Game difficulty = game+0x6D (PlugY's struct).
 typedef DWORD (__fastcall *dc_spawn_t)(DWORD id, DWORD mode, DWORD game, DWORD room, DWORD x, DWORD y, DWORD one, DWORD zero);
-static int dclone_spawn(DWORD game, DWORD player, const char *why) {
-    HMODULE g = GetModuleHandleA("D2Game.dll"); if (!g || !readable((const void *)player, 0x30) || !readable((const void *)game, 0x80)) return 0;
-    static const BYTE sig[11] = {0x83,0xEC,0x28,0x89,0x4C,0x24,0x0C,0x8B,0x4C,0x24,0x30};
-    BYTE *fn = (BYTE *)g + 0xC8D70;
-    if (!readable(fn, 11) || memcmp(fn, sig, 11)) { logf_("dclone: SpawnMonster is not where expected; not spawning"); return 0; }
-    int diff = *(BYTE *)(game + 0x6D); if (diff < 0 || diff > 2) { logf_("dclone: odd difficulty byte %d; not spawning", diff); return 0; }
-    DWORD path = *(DWORD *)(player + 0x2C); if (!readable((const void *)path, 0x20)) return 0;
-    DWORD room = *(DWORD *)(path + 0x1C); if (!readable((const void *)room, 0x20)) return 0;
-    DWORD r2 = *(DWORD *)(room + 0x10), lvl = r2 && readable((const void *)r2, 0x60) ? *(DWORD *)(r2 + 0x58) : 0;
-    int lno = lvl && readable((const void *)lvl, 0x1D4) ? (int)*(DWORD *)(lvl + 0x1D0) : -1;
-    if (lno <= 0 || lno > 136) { logf_("dclone: %s: could not read the level number (%d); not spawning, so he can never appear in a town by mistake", why, lno); return 0; }
-    if (lno == 1 || lno == 40 || lno == 75 || lno == 103 || lno == 109) { logf_("dclone: %s: the player is in a town (level %d); not spawning", why, lno); return 0; }
-    int x = *(WORD *)(path + 2), y = *(WORD *)(path + 6);
-    static const int off[10][2] = {{6,0},{-6,0},{0,6},{0,-6},{5,5},{-5,-5},{5,-5},{-5,5},{3,0},{0,0}};
-    int start = rand() % 8;
-    dc_spawn_t spawn = (dc_spawn_t)(void *)fn;
-    for (int k = 0; k < 10; k++) {
-        int o = k < 8 ? (start + k) % 8 : k;
-        DWORD u = spawn(g_dc_class, 1, game, room, (DWORD)(x + off[o][0]), (DWORD)(y + off[o][1]), 1, 0);
-        if (u) { logf_("dclone: %s: spawned class %d at %d,%d (offset %d,%d) on difficulty %d, level %d, unit %lx", why, g_dc_class, x + off[o][0], y + off[o][1], off[o][0], off[o][1], diff, lno, (unsigned long)u); return 1; }
-    }
-    logf_("dclone: %s: SpawnMonster returned nothing for every offset (player at %d,%d, room %lx, difficulty %d)", why, x, y, (unsigned long)room, diff);
-    return 0;
-}
 // The announcement is the game's own world-event packet (S->C 0x5A, 40 bytes: type, fct 0x12 = "Diablo Walks the Earth", id 4, param dword, word, 31 bytes), the layout PlugY
 // sends for its Diablo Clone event, broadcast to every client of the game with D2Game 1.13d BroadcastFunction RVA 0xBB510 (eax = game, edi = callback, ebx = param) and
 // SendPacket RVA 0xDB780 (eax = client, two stack args data and size). Both are wrapped by small stubs into fastcall form, exactly as PlugY's wrappers do.
@@ -1342,12 +1339,64 @@ static void dclone_random(DWORD game, DWORD player) {                          /
     if (roll >= g_dc_chance) return;
     (void)player; dclone_trigger(game, "random");
 }
+// .god and .xp on|off (cheats). Per player (the unit id of whoever typed it): god = life can never go down; xp off = experience can never go up. Both work by hooking D2Common's stat setters in D2Game
+// (SetUnitStat #10590, AddPlayerStat #10645, base-stat reader #10216): a life stat (6) that would drop is kept where it is, an experience stat (13) that would rise is kept where it is.
+static DWORD g_ch_id[2][8]; static int g_ch_n[2];                                                       // [0] god, [1] xp off: unit ids
+static int ch_has(int k, DWORD id) { for (int i = 0; i < g_ch_n[k]; i++) if (g_ch_id[k][i] == id) return 1; return 0; }
+static int (__stdcall *o_ch_set)(DWORD, DWORD, DWORD, DWORD), (__stdcall *o_ch_add)(DWORD, DWORD, int, DWORD), (__stdcall *ch_getbase)(DWORD, DWORD, DWORD);
+static int ch_player(DWORD unit) { return unit && readable((const void *)unit, 0x10) && *(DWORD *)unit == 0; }
+static volatile LONG g_ch_blocked[2];                                                                    // how many life drops / experience gains were held back (logged: the first 5, then every 50th)
+static void ch_note(int k, const char *how, int from, int to) { LONG n = InterlockedIncrement(&g_ch_blocked[k]); if (n <= 5 || n % 50 == 0) logf_("cheats: %s held back (%s) %d -> %d (#%ld)", k == 0 ? "a life drop" : "an experience gain", how, from, to, (long)n); }
+static int __stdcall h_ch_set(DWORD unit, DWORD stat, DWORD value, DWORD layer) {
+    if ((stat == 6 || stat == 13) && ch_getbase && ch_player(unit) && ch_has(stat == 6 ? 0 : 1, *(DWORD *)(unit + 0xC))) {
+        int cur = ch_getbase(unit, stat, layer);
+        if (stat == 6 && (int)value < cur) { ch_note(0, "set", cur, (int)value); value = (DWORD)cur; }          // god: no damage
+        if (stat == 13 && (int)value > cur) { ch_note(1, "set", cur, (int)value); value = (DWORD)cur; }         // xp off: no experience
+    }
+    return o_ch_set(unit, stat, value, layer);
+}
+static int __stdcall h_ch_add(DWORD unit, DWORD stat, int delta, DWORD layer) {
+    if (((stat == 6 && delta < 0) || (stat == 13 && delta > 0)) && ch_player(unit) && ch_has(stat == 6 ? 0 : 1, *(DWORD *)(unit + 0xC))) { ch_note(stat == 6 ? 0 : 1, "add", 0, delta); delta = 0; }
+    return o_ch_add(unit, stat, delta, layer);
+}
+static void cheat_install(HMODULE g) {
+    HMODULE c = GetModuleHandleA("D2Common.dll"); if (!c) return;
+    ch_getbase = (int (__stdcall *)(DWORD, DWORD, DWORD))(void *)GetProcAddress(c, (LPCSTR)(UINT_PTR)10216);
+    int a = hook_import_ordinal(g, "D2Common.dll", 10590, h_ch_set, (void **)&o_ch_set), b = hook_import_ordinal(g, "D2Common.dll", 10645, h_ch_add, (void **)&o_ch_add);
+    logf_("cheats: god / xp hooks in D2Game (SetUnitStat %d, AddPlayerStat %d, base-stat reader %s)", a, b, ch_getbase ? "ok" : "MISSING");
+}
+static int pick3(void) { static unsigned r; r = r * 1103515245u + 12345u + GetTickCount(); return (int)((r >> 16) % 3); }          // which of the three wordings
+static void say3(const char *a, const char *b, const char *c) { int k = pick3(); snprintf(g_cmsg, sizeof g_cmsg, "%s", k == 0 ? a : k == 1 ? b : c); g_cmsg_at = GetTickCount(); g_cmsg_new = 1; }
+static void say3f(const char *a, const char *b, const char *c, double v) { const char *f[3] = {a, b, c}; snprintf(g_cmsg, sizeof g_cmsg, f[pick3()], v); g_cmsg_at = GetTickCount(); g_cmsg_new = 1; }
+static void cheat_flag(DWORD player, int k, int arg) {                                                   // k 0 = god, 1 = xp off; arg 1 = on, 0 = off, -1 = toggle (god) or show (xp)
+    DWORD id = *(DWORD *)(player + 0xC); int has = ch_has(k, id), want = arg < 0 ? !has : (k == 0 ? arg : !arg);   // the flag is 'god on' or 'xp OFF': .xp on = flag off; a bare .god or .xp flips it
+    if (k == 1 && arg == 2) {
+        if (has) say3("No glory comes to you now. Experience gain is off.", "The Worldstone turns its gaze from you. Experience gain is off.", "Your hunger for glory sleeps. Experience gain is off.");
+        else say3("Glory flows freely to you. Experience gain is on.", "The Worldstone watches over your deeds. Experience gain is on.", "Your hunger for glory is fed. Experience gain is on.");
+        return; }
+    if (want && !has && g_ch_n[k] < 8) g_ch_id[k][g_ch_n[k]++] = id;
+    if (!want && has) { for (int i = 0; i < g_ch_n[k]; i++) if (g_ch_id[k][i] == id) { g_ch_id[k][i] = g_ch_id[k][--g_ch_n[k]]; break; } }
+    if (k == 0 && want) say3("The Heavens shield you. Nothing can harm you now.", "An angel's hand steadies yours and you cannot fall.", "Tyrael's blessing wards you and no blow can bring you down.");
+    else if (k == 0) say3("The blessing fades. You are mortal once more.", "The Heavens withdraw their hand and you bleed again.", "Your guardian departs. Death walks beside you again.");
+    else if (want) say3("The stars turn from you. Experience gain is now off.", "Your glory slumbers. Experience gain is now off.", "The Worldstone looks away. Experience gain is now off.");
+    else say3("Glory calls again. Experience gain is now on.", "The Worldstone smiles upon you. Experience gain is now on.", "Your hunger for glory returns. Experience gain is now on.");
+    logf_("cheats: %s %s for unit %lu", k == 0 ? ".god" : ".xp", want ? "on" : "off", (unsigned long)id);
+}
+static void cheat_density(double n) {                                       // .density N: N times the normal monster density AND elite packs in EVERY area; 1 = normal (off); no number = show it
+    if (n < 0) { say3f("The horde stands at x%.2g its usual number.", "The legions gather at x%.2g the usual brood.", "The darkness teems at x%.2g.", 1.0 + g_world_pct / 100.0); return; }
+    if (n < 1) n = 1; if (n > 10) n = 10;
+    int pct = (int)((n - 1.0) * 100.0 + 0.5); g_world_pct = pct;
+    say3f("Hell's gates strain as the horde swells to x%.2g.", "The darkness teems and the legions now number x%.2g.", "More of them crawl from the shadows, x%.2g now.", n);
+    logf_("cheats: .density %.2f -> world percent %d", n, pct);
+}
 static void __cdecl qt_srv_tick(DWORD game, DWORD player, DWORD id, const unsigned char *buf, DWORD size) {
     static DWORD last_player, next;
-    if ((g_respec || g_dclone) && id == 0x15 && size > 4 && size < 64 && readable(buf, size) && readable((const void *)player, 0xB0) && *(DWORD *)player == 0) {   // a chat line from ANY player: only a player unit resets itself
+    if ((g_respec || g_dclone || g_cheats) && id == 0x15 && size > 4 && size < 64 && readable(buf, size) && readable((const void *)player, 0xB0) && *(DWORD *)player == 0) {   // a chat line from ANY player: only a player unit resets itself
+        { static int shown; if (g_logging && shown < 40) { char t[64]; int k = 0; for (DWORD i = 1; i < size && k < 62; i++) t[k++] = (buf[i] >= 32 && buf[i] < 127) ? (char)buf[i] : '.'; t[k] = 0; shown++; logf_("chat line seen by the server: \"%s\" (%u bytes)", t, (unsigned)size); } }
         int req = respec_parse(buf, (int)size);
-        if (req == 3) { if (g_dclone) { logf_("dclone: .dclone typed in the chat"); dclone_trigger(game, "command"); } }
-        else if (req == 4) { if (g_dclone) { logf_("dclone: .dclone now typed in the chat"); dclone_spawn(game, player, "command (now)"); } }
+        if (req == 3) { if (g_cheats) { logf_("dclone: .dclone typed in the chat"); dclone_trigger(game, "command"); } }
+        else if (req == 6 || req == 7) { if (g_cheats) cheat_flag(player, req == 6 ? 0 : 1, g_cmd_arg); }
+        else if (req == 5) { logf_("cheats: .density typed (value %.2f, cheats %s)", g_cmd_density, g_cheats ? "on" : "OFF"); if (g_cheats) cheat_density(g_cmd_density); }
         else if (req && g_respec) {
             logf_("respec: %s requested by a player in the game", req == 1 ? "stats" : "skills");
             respec_run(player, req);
@@ -1501,7 +1550,7 @@ static int __stdcall h_tz_add(DWORD unit, DWORD stat, int delta, DWORD layer) {
 // the item level of its drops, so raising it raises both. Applied to the zone of the current clock slot (original saved and put back when the zone changes or the game is not Hell with
 // hell_only), result = max(original + level_bonus, min_level) limited to max_level (item level tops out at 99). Only areas created after the change get monsters of the new level.
 typedef struct { BYTE *rec; int id; WORD lvl_orig, lvl_set; int lvl; DWORD d_orig, d_set; int dens; BYTE u_orig[2], u_set[2]; BYTE *u_at[2]; int ue; } tzm_t;
-static tzm_t g_tzm[12]; static int g_tzm_n, g_tzm_group = -1, g_tzm_diff = -1;               // the areas of the current zone that were changed, and what they were
+static tzm_t g_tzm[12]; static int g_tzm_n, g_tzm_group = -1, g_tzm_diff = -1, g_sp_wp = -1; static DWORD g_sp_gamekey;               // the areas of the current zone that were changed, and what they were
 static void tz_restore_member(tzm_t *m, int diff) {
     if (m->lvl && readable(m->rec, 0x1C) && *(WORD *)(m->rec + 0x16 + 2 * diff) == m->lvl_set) *(WORD *)(m->rec + 0x16 + 2 * diff) = m->lvl_orig;
     if (m->dens && readable(m->rec, 0x30) && *(DWORD *)(m->rec + 0x1C + 4 * diff) == m->d_set) *(DWORD *)(m->rec + 0x1C + 4 * diff) = m->d_orig;
@@ -1518,38 +1567,55 @@ static int tz_apply_member(tzm_t *m, int ci, int diff, BYTE *(__stdcall *get_rec
         int nl = orig + g_tz_lvl_bonus; if (diff == 2 && nl < g_tz_lvl_min) nl = g_tz_lvl_min; if (nl > (diff == 2 ? g_tz_lvl_max : 99)) nl = diff == 2 ? g_tz_lvl_max : 99; if (nl < orig) nl = orig;
         m->lvl_set = (WORD)nl; *f = (WORD)nl; m->lvl = 1;
         logf_("terror zone: area %d (%s) level %d -> %d", id, diff == 0 ? "Normal" : diff == 1 ? "Nightmare" : "Hell", orig, nl); }
-    // density (MonDen, a DWORD per difficulty at record +0x1C) and elite packs (MonUMin / MonUMax, bytes at +0x28..+0x2D): the layout is recognised by comparing the record with what Levels.txt says
-    if (readable(rec, 0x30)) {
-        if (g_tz_dens_pct > 0 && g_tz_den[ci][0] >= 0 && *(DWORD *)(rec + 0x1C) == (DWORD)g_tz_den[ci][0] && *(DWORD *)(rec + 0x20) == (DWORD)g_tz_den[ci][1] && *(DWORD *)(rec + 0x24) == (DWORD)g_tz_den[ci][2]) {
-            DWORD *d = (DWORD *)(rec + 0x1C + 4 * diff); m->d_orig = *d; m->d_set = (DWORD)(((unsigned long long)m->d_orig * (100u + (unsigned)g_tz_dens_pct) + 50) / 100); *d = m->d_set; m->dens = 1;
-            logf_("terror zone: area %d density %lu -> %lu", id, (unsigned long)m->d_orig, (unsigned long)m->d_set); }
-        else if (g_tz_dens_pct > 0) logf_("terror zone: area %d density not changed: the record at +0x1c is %lu %lu %lu, Levels.txt says %d %d %d", id, (unsigned long)*(DWORD *)(rec + 0x1C), (unsigned long)*(DWORD *)(rec + 0x20), (unsigned long)*(DWORD *)(rec + 0x24), g_tz_den[ci][0], g_tz_den[ci][1], g_tz_den[ci][2]);
-        if (g_tz_elite_pct > 0) {
-            const BYTE *u = rec + 0x28; int lay = 0;                                                  // layout A: min[3] then max[3]; layout B: min, max per difficulty
-            int a = 1, b = 1; for (int d = 0; d < 3; d++) { if (u[d] != g_tz_umin[ci][d] || u[3 + d] != g_tz_umax[ci][d]) a = 0; if (u[2 * d] != g_tz_umin[ci][d] || u[2 * d + 1] != g_tz_umax[ci][d]) b = 0; }
-            lay = a ? 1 : b ? 2 : 0;
-            if (lay) { BYTE *pm = rec + 0x28 + (lay == 1 ? diff : 2 * diff), *px = rec + 0x28 + (lay == 1 ? 3 + diff : 2 * diff + 1);
-                m->u_at[0] = pm; m->u_at[1] = px; m->u_orig[0] = *pm; m->u_orig[1] = *px;
-                int nmx = (*px * (100 + g_tz_elite_pct) + 99) / 100; if (nmx < 1) nmx = 1; if (nmx > 255) nmx = 255;
-                int nmn = (*pm * (100 + g_tz_elite_pct) + 99) / 100; if (nmn > nmx) nmn = nmx; if (nmn > 255) nmn = 255;
-                m->u_set[0] = (BYTE)nmn; m->u_set[1] = (BYTE)nmx; *pm = m->u_set[0]; *px = m->u_set[1]; m->ue = 1;
-                logf_("terror zone: area %d elite packs %d-%d -> %d-%d (layout %c)", id, m->u_orig[0], m->u_orig[1], nmn, nmx, lay == 1 ? 'A' : 'B'); }
-            else logf_("terror zone: area %d elite packs not changed: the record at +0x28 is %d %d %d %d %d %d, Levels.txt says min %d %d %d max %d %d %d", id, u[0], u[1], u[2], u[3], u[4], u[5], g_tz_umin[ci][0], g_tz_umin[ci][1], g_tz_umin[ci][2], g_tz_umax[ci][0], g_tz_umax[ci][1], g_tz_umax[ci][2]); }
-    }
+    // density and elite packs are NOT changed in this table any more: the game copies them into its own per-game spawn structures when the game is created (see spawn_sync), so a change here comes too late
     return 1;
+}
+// Why the density never changed anything (found 2026-11-21 in the D2Game code): when a game is created, D2Game (RVA 0x29D60, called once from 0x29EF0) builds a 0x2E4-byte spawn structure for EVERY level
+// and copies the Levels.txt density (record +0x1C + 4 x difficulty -> struct +0x2B8), the elite pack minimum / maximum (record +0x28 / +0x2B + difficulty -> struct +0x2BC / +0x2BD) and the monster level
+// (record +0x16 + 2 x difficulty -> struct +0x2DC and +0x2E0) into it. The pointers sit in the game: level k at game + 0xF0 + 4 x k. Changing the Levels.txt record afterwards (what the terror zone did) therefore
+// changes nothing; the structures have to be changed. spawn_sync keeps the original values of each candidate area (verified against Levels.txt before the first change) and writes the wanted ones: the terror
+// zone's areas get density_pct / elite_pct and the level bonus, every area gets the .density percentage (the larger of the two for the zone). Rooms already generated keep their monsters.
+typedef struct { int saved; DWORD den; BYTE umin, umax; int l1, l2; } sp_orig_t;
+static sp_orig_t g_sp[256]; static DWORD g_sp_game; static volatile int g_world_pct;
+static void spawn_sync(DWORD game, int diff, int want, int wp) {
+    if (g_sp_game != game) { memset(g_sp, 0, sizeof g_sp); g_sp_game = game; }
+    int done = 0, mism = 0, changed = 0;
+    for (int ci = 0; ci < g_tz_n; ci++) {
+        int id = g_tz_id[ci]; if (id < 1 || id > 255 || !readable((const void *)(game + 0xF0 + 4 * (DWORD)id), 4)) continue;
+        DWORD si = *(DWORD *)(game + 0xF0 + 4 * (DWORD)id); if (!si || !readable((const void *)si, 0x2E4)) continue;
+        sp_orig_t *o = &g_sp[id];
+        if (!o->saved) {
+            if (g_tz_den[ci][diff] < 0 || *(DWORD *)(si + 0x2B8) != (DWORD)g_tz_den[ci][diff]) { mism++; if (mism <= 3) logf_("spawn: area %d density in the game's spawn structure is %lu, Levels.txt says %d: left alone", id, (unsigned long)*(DWORD *)(si + 0x2B8), g_tz_den[ci][diff]); continue; }
+            o->den = *(DWORD *)(si + 0x2B8); o->umin = *(BYTE *)(si + 0x2BC); o->umax = *(BYTE *)(si + 0x2BD); o->l1 = *(int *)(si + 0x2DC); o->l2 = *(int *)(si + 0x2E0); o->saved = 1; }
+        int inzone = want >= 0 && g_tz_grp[ci] == want;
+        int dp = inzone && g_tz_dens_pct > wp ? g_tz_dens_pct : wp, ep = inzone && g_tz_elite_pct > wp ? g_tz_elite_pct : wp;
+        DWORD nd = (DWORD)(((unsigned long long)o->den * (100u + (unsigned)dp) + 50) / 100);
+        int nmx = o->umax, nmn = o->umin;
+        if (ep > 0 && o->umax > 0) { nmx = (o->umax * (100 + ep) + 99) / 100; if (nmx > 255) nmx = 255; nmn = (o->umin * (100 + ep) + 99) / 100; if (nmn > nmx) nmn = nmx; }
+        int l1 = o->l1, l2 = o->l2;
+        if (inzone && o->l2 > 0 && (g_tz_lvl_bonus > 0 || (diff == 2 && g_tz_lvl_min > 0))) {
+            int nl = o->l2 + g_tz_lvl_bonus; if (diff == 2 && nl < g_tz_lvl_min) nl = g_tz_lvl_min; if (nl > (diff == 2 ? g_tz_lvl_max : 99)) nl = diff == 2 ? g_tz_lvl_max : 99; if (nl < o->l2) nl = o->l2; l1 = l2 = nl; }
+        if (*(DWORD *)(si + 0x2B8) != nd || *(BYTE *)(si + 0x2BC) != nmn || *(BYTE *)(si + 0x2BD) != nmx || *(int *)(si + 0x2DC) != l1) changed++;
+        *(DWORD *)(si + 0x2B8) = nd; *(BYTE *)(si + 0x2BC) = (BYTE)nmn; *(BYTE *)(si + 0x2BD) = (BYTE)nmx; *(int *)(si + 0x2DC) = l1; *(int *)(si + 0x2E0) = l2;
+        if (inzone) logf_("spawn: zone area %d: density %lu -> %lu, elite packs %d-%d -> %d-%d, monster level %d -> %d", id, (unsigned long)o->den, (unsigned long)nd, o->umin, o->umax, nmn, nmx, o->l2, l2);
+        done++;
+    }
+    logf_("spawn: %d areas synced (%d changed, %d skipped), world density x%.1f, zone group %d, %s", done, changed, mism, 1.0 + wp / 100.0, want, diff == 0 ? "Normal" : diff == 1 ? "Nightmare" : "Hell");
 }
 static void tz_apply_level(void) {
     static BYTE *(__stdcall *get_rec)(DWORD); static DWORD last_run; DWORD tnow = GetTickCount();
     if (tnow - last_run < 250) return; last_run = tnow;                                                    // a few times a second is plenty
-    if (!g_tz || g_tz_n <= 0) return;
+    if ((!g_tz && !g_horde && !g_cheats) || g_tz_n <= 0) return;
     if (!get_rec) { HMODULE c = GetModuleHandleA("D2Common.dll"); if (c) get_rec = (BYTE *(__stdcall *)(DWORD))(void *)GetProcAddress(c, (LPCSTR)(UINT_PTR)10142); if (!get_rec) return; }
     DWORD g = g_srv_game; int diff = (g && readable((const void *)g, 0x80)) ? (int)*(BYTE *)(g + 0x6D) : -1;
     int want = -1;                                                                                         // the zone (its group number) that should be active now, or -1
-    if (diff >= 0 && diff <= 2 && tz_active() && local_player_id()) want = g_tz_grp[tz_index_for((long long)(time(NULL) / ((long long)g_tz_minutes * 60)))];
-    if (want == g_tzm_group && diff == g_tzm_diff) return;
+    if (g_tz && diff >= 0 && diff <= 2 && tz_active() && local_player_id()) want = g_tz_grp[tz_index_for((long long)(time(NULL) / ((long long)g_tz_minutes * 60)))];
+    int wp = g_world_pct;
+    if (want == g_tzm_group && diff == g_tzm_diff && wp == g_sp_wp && g == g_sp_gamekey) return;
     for (int i = 0; i < g_tzm_n; i++) tz_restore_member(&g_tzm[i], g_tzm_diff);                            // put the old zone back (if nobody else changed it meanwhile)
-    g_tzm_n = 0; g_tzm_group = want; g_tzm_diff = diff;
+    g_tzm_n = 0; g_tzm_group = want; g_tzm_diff = diff; g_sp_wp = wp; g_sp_gamekey = g;
     if (want >= 0) for (int ci = 0; ci < g_tz_n && g_tzm_n < 12; ci++) if (g_tz_grp[ci] == want && tz_apply_member(&g_tzm[g_tzm_n], ci, diff, get_rec)) g_tzm_n++;
+    if (g && diff >= 0 && diff <= 2) spawn_sync(g, diff, want, wp);
 }
 // For other mods (qol_ui's map overlay): the Levels.txt id of the current terror zone, or 0 when there is none (feature off, not Hell with hell_only, no game yet). Plain cdecl export.
 __declspec(dllexport) int qol_terror_zone(void) {                                                       // the first area of the current zone (kept for older qol_ui builds)
@@ -1584,13 +1650,13 @@ static void tz_install(HMODULE g) {
 }
 static DWORD WINAPI summon_thread(LPVOID arg) {
     (void)arg;
-    if (!g_summons && !g_respec && !g_glow_on && !g_dclone && !g_tz) return 0;
+    if (!g_summons && !g_respec && !g_glow_on && !g_dclone && !g_tz && !g_horde && !g_cheats) return 0;
     for (int i = 0; i < 6000; i++) {
         HMODULE g = GetModuleHandleA("D2Game.dll");
         if (g) {
             IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)g + ((IMAGE_DOS_HEADER *)g)->e_lfanew);
             if (nt->FileHeader.TimeDateStamp != D2GAME_TIMESTAMP_113D) logf_("summons: this D2Game build is not supported; not installed");
-            else { patch_summon_hook(g); if (g_dclone) dclone_install(g); if (g_tz) tz_install(g); }
+            else { patch_summon_hook(g); if (g_dclone || g_cheats) dclone_install(g); if (g_tz) tz_install(g); if (g_cheats) cheat_install(g); }
             return 0;
         }
         Sleep(100);

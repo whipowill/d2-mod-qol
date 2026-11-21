@@ -11,7 +11,7 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 - **Auto Click** - hold spacebar for repeated left mouse clicks (works w/ PD2)
 - **Auto Pickup** - potions, scrolls, keys, and gold (works w/ PD2)
 - **Hitcap 100%** - attack rating can reach 100% hit chance on monsters
-- **NoXP Penalty** - no longer penalized for fighting low lvl monsters, or partying high level friends
+- **No XP Penalty** - no longer penalized for fighting low lvl monsters, or partying high level friends
 - **Death Keep** - no longer lose your gear when you die
 - **Merc Equip** - mercs can equip various item types consistent w/ their class, including quivers
 - **Merc Drop** - mercs will drop their gear if you hire a new one
@@ -22,7 +22,7 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 - **Achievement Aura** - bask in the glow of your achievement with Hell completion aura
 - **Random DClone** - stay on your toes w/ randomized DClone spawns as you play
 - **Terror Zones** - random zones will double gold, XP, MF, and monster density
-- **Free Respec** - reset your stats or your skills on demand
+- **Horde Mode** - increase the default monster density of the game
 
 ### Bug Fixes
 
@@ -33,10 +33,14 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 
 ## Commands
 
+These commands only work if ``cheats`` are turned on in the config file:
+
+- ``.god`` - make yourself invulnerable for fun
+- ``.xp on|off`` - control when you gain XP if you want to
+- ``.density 10`` - play custom density settings on the fly
+- ``.dclone`` - force Diablo to walk the Earth
 - ``.reset skills`` - reset your skills
 - ``.reset stats`` - reset your stats
-- ``.dclone`` - start the DClone event now (he takes the place of the next super unique you meet)
-- ``.dclone now`` - spawn DClone right next to you (testing)
 
 ## Install
 
