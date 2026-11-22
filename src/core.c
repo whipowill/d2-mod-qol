@@ -75,6 +75,7 @@ static void say(const char *fmt, ...) {
 // cls 2 = scroll (kind 0 identify -> tome ibk, 1 town portal -> tome tbk)
 // cls 3 = key (goes into an existing key stack in the inventory)
 // cls 4 = gold (added straight to your gold, never touches the cursor)
+// cls 5 = rune / gem / essence / Worldstone Shard (kind 0..3): lands on the cursor, so it is then put into a free inventory cell (packet 0x18)
 static int classify(const char *c, int *cls, int *kind, int *tier) {
     *tier = 1;
     if (c[0] == 'h' && c[1] == 'p' && c[2] >= '1' && c[2] <= '5' && !c[3]) { *cls = 1; *kind = 0; *tier = c[2] - '0'; return 1; }
@@ -82,6 +83,13 @@ static int classify(const char *c, int *cls, int *kind, int *tier) {
     if (!strcmp(c, "rvs")) { *cls = 1; *kind = 2; *tier = 1; return 1; }
     if (!strcmp(c, "rvl")) { *cls = 1; *kind = 2; *tier = 2; return 1; }
     if (!strcmp(c, "vps")) { *cls = 1; *kind = 3; return 1; }
+    if (c[0] == 'r' && c[1] >= '0' && c[1] <= '3' && c[2] >= '0' && c[2] <= '9' && !c[3]) {   // runes r01..r33
+        int n = (c[1] - '0') * 10 + (c[2] - '0'); if (n >= 1 && n <= 33) { *cls = 5; *kind = 0; return 1; }
+    }
+    if (c[0] == 'g' && c[1] && strchr("cfszpl", c[1]) && c[2] && strchr("vybgrw", c[2]) && !c[3]) { *cls = 5; *kind = 1; return 1; }                     // gems (flawless is gl? except Amethyst gzv)
+    if (c[0] == 's' && c[1] == 'k' && c[2] && strchr("cfulz", c[2]) && !c[3]) { *cls = 5; *kind = 1; return 1; }                                         // skulls
+    if (!strcmp(c, "tes") || !strcmp(c, "ceh") || !strcmp(c, "bet") || !strcmp(c, "fed")) { *cls = 5; *kind = 2; return 1; }                              // evil essences
+    if (!strcmp(c, "wss")) { *cls = 5; *kind = 3; return 1; }                                                                                              // Worldstone Shard
     if (!strcmp(c, "gld")) { *cls = 4; *kind = 0; return 1; }
     if (!strcmp(c, "key")) { *cls = 3; *kind = 0; return 1; }
     if (!strcmp(c, "isc")) { *cls = 2; *kind = 0; return 1; }
@@ -163,6 +171,42 @@ static int parse_item(const uint8_t *p, int len, item_t *it) {
 // ---- state tables ----------------------------------------------------------------------------------
 static void ground_remove(uint32_t id) { for (int i = 0; i < MAX_GROUND; i++) if (ground[i].id == id) ground[i].id = 0; }
 static void belt_remove(uint32_t id) { for (int i = 0; i < MAX_BELT; i++) if (belt[i].id == id) belt[i].id = 0; }
+
+// ---- inventory cells (from the item packets) and item sizes (from the item tables) ------------------------------------------------
+// Items that are picked up to the cursor (runes, gems, essences, shards) have to be put somewhere. The inventory is 10 x 4 cells (the grid of Inventory.txt);
+// its content is tracked from the "stored" item packets (mode 0, page 1) and the sizes of the items from Armor / Weapons / Misc.txt.
+#define INV_W 10
+#define INV_H 4
+#define MAX_INV 96
+#define MAX_SZ 3072
+typedef struct { uint32_t id; uint8_t x, y, w, h; } inv_t;
+static inv_t inv_it[MAX_INV];
+static struct { char code[5]; uint8_t w, h; } sz_tab[MAX_SZ]; static int sz_n;
+static uint32_t place_id, place_t, place_try_t; static int place_x, place_y, place_fails; static int place_bad[16][2], place_nbad;   // the item we are putting away
+static void inv_remove(uint32_t id) { for (int i = 0; i < MAX_INV; i++) if (inv_it[i].id == id) inv_it[i].id = 0; }
+static void size_of(const char *code, int *w, int *h) {
+    *w = *h = 1;
+    for (int i = 0; i < sz_n; i++) if (!strcmp(sz_tab[i].code, code)) { *w = sz_tab[i].w; *h = sz_tab[i].h; return; }
+}
+static void inv_add(uint32_t id, const char *code, int x, int y) {
+    inv_remove(id);
+    int w, h; size_of(code, &w, &h);
+    for (int i = 0; i < MAX_INV; i++) if (!inv_it[i].id) { inv_it[i] = (inv_t){id, (uint8_t)x, (uint8_t)y, (uint8_t)w, (uint8_t)h}; return; }
+}
+static int inv_cell_used(int cx, int cy) {
+    for (int i = 0; i < MAX_INV; i++) {
+        const inv_t *t = &inv_it[i];
+        if (t->id && cx >= t->x && cx < t->x + t->w && cy >= t->y && cy < t->y + t->h) return 1;
+    }
+    return 0;
+}
+static int place_is_bad(int x, int y) { for (int i = 0; i < place_nbad; i++) if (place_bad[i][0] == x && place_bad[i][1] == y) return 1; return 0; }
+// A free 1x1 cell, searched from the bottom right so the way the player arranged the top left is left alone. Cells that the server refused are skipped.
+static int inv_free_cell(int *fx, int *fy) {
+    for (int x = INV_W - 1; x >= 0; x--) for (int y = INV_H - 1; y >= 0; y--)
+        if (!inv_cell_used(x, y) && !place_is_bad(x, y)) { if (fx) *fx = x; if (fy) *fy = y; return 1; }
+    return 0;
+}
 static void kstack_remove(uint32_t id) { for (int i = 0; i < MAX_KSTACK; i++) if (kst[i].id == id) kst[i].id = 0; }
 
 static uint32_t fnv(const uint8_t *p, int n);
@@ -216,7 +260,7 @@ static void tome_mark_full(int k) {
 }
 
 static void remove_everywhere(uint32_t id) {
-    ground_remove(id); belt_remove(id); kstack_remove(id);
+    ground_remove(id); belt_remove(id); kstack_remove(id); inv_remove(id);
     if (cursor_id == id) cursor_id = 0;
     if (key_pend_id == id) {
         // Looks merged into a stack. If the server was refusing it comes back onto the ground (see on_item).
@@ -291,7 +335,8 @@ static void on_item(const uint8_t *p, int len) {
 
     // The item moves: drop it from wherever we had it, then re-add per its new mode.
     if (it.id) {
-        ground_remove(it.id); belt_remove(it.id); if (cursor_id == it.id) cursor_id = 0;
+        ground_remove(it.id); belt_remove(it.id); inv_remove(it.id); if (cursor_id == it.id) cursor_id = 0;
+        if (place_id == it.id && it.mode == 0 && it.page == 1) { say("%s id=%u put into the inventory at (%d,%d)", it.code, it.id, it.px, it.py); place_id = 0; place_try_t = 0; place_fails = 0; place_nbad = 0; }
         if (!(it.mode == 0 && it.page == 1 && !strcmp(it.code, "key"))) kstack_remove(it.id);   // an inventory key stack keeps its learned state
     }
 
@@ -314,6 +359,7 @@ static void on_item(const uint8_t *p, int len) {
             keys_mark_full(key_gone_qty); key_gone_id = 0;
             say("key %u came back onto the ground -> key stacks are full", it.id);
         }
+        if (pot && cls == 5 && !((kind == 0 && cfg.runes) || (kind == 1 && cfg.gems) || (kind == 2 && cfg.essences) || (kind == 3 && cfg.shards))) pot = 0;   // switched off: not even tracked
         if (pot && it.id) {
             for (int i = 0; i < MAX_GROUND; i++) if (!ground[i].id) {
                 ground[i] = (ground_t){it.id, it.x, it.y, cls, kind, tier, {0}, 0, 0, 99, it.qty > 0 ? it.qty : 1};
@@ -335,6 +381,7 @@ static void on_item(const uint8_t *p, int len) {
     case 4:   // cursor
         cursor_id = it.id; cursor_t = now_ms; break;
     case 0:   // stored (inventory/stash/cube): remember tomes
+        if (it.page == 1 && it.id) inv_add(it.id, it.code, it.px, it.py);
         if (!strcmp(it.code, "key") && it.page == 1) {          // inventory key stack
             uint32_t h = fnv_item(p, len); int k = -1, fresh = 0;
             for (int i = 0; i < MAX_KSTACK; i++) if (kst[i].id == it.id) k = i;
@@ -449,6 +496,7 @@ void ap_init(const ap_config *c, ap_logfn l) {
     belt_miss = 0; memset(tome_id, 0, sizeof tome_id); memset(tome_full, 0, sizeof tome_full); scroll_pend_id = pot_pend_id = scroll_gone_id = 0;
     memset(kst, 0, sizeof kst); key_pend_id = key_gone_id = 0; memset(&sk_expect, 0, sizeof sk_expect);
     tome_qty[0] = tome_qty[1] = -1; tome_hash[0] = tome_hash[1] = 0; scroll_gone_applied = 0;
+    memset(inv_it, 0, sizeof inv_it); place_id = place_try_t = 0; place_fails = place_nbad = 0;
 }
 
 static uint32_t u32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -512,6 +560,13 @@ static int wanted(const ground_t *g) {
     if (g->cls == 1) return potion_wanted(g->kind, g->tier);
     if (g->cls == 3) return key_fits(g->qty);
     if (g->cls == 4) return cfg.gold;
+    if (g->cls == 5) {
+        if (g->kind == 0 && !cfg.runes) return 0;
+        if (g->kind == 1 && !cfg.gems) return 0;
+        if (g->kind == 2 && !cfg.essences) return 0;
+        if (g->kind == 3 && !cfg.shards) return 0;
+        return !place_id;                                               // one at a time; whether there is room is for the game to say (we only look for a cell once it is on the cursor)
+    }
     return tome_has_room(g->kind);
 }
 
@@ -523,12 +578,28 @@ int ap_due(uint32_t now) {
     return 0;
 }
 
-int ap_tick(uint32_t now, uint8_t out[16]) {
+int ap_tick(uint32_t now, uint8_t out[32]) {
     now_ms = now;
     if (!cfg.enabled || !have_pos || in_town || now - last_tick < (uint32_t)(cfg.poll_ms > 0 ? (cfg.poll_ms < 20 ? 20 : cfg.poll_ms > 2000 ? 2000 : cfg.poll_ms) : TICK_MS)) return 0;
     last_tick = now;
     // A cursor item we never saw leave would block every pickup for the rest of the game: expire it.
     if (cursor_id && now - cursor_t > 20000) { say("cursor item %u unchanged for 20 s: assuming it is gone", cursor_id); cursor_id = 0; }
+    if (place_id && now - place_t > 12000) { say("giving up on putting %u away (12 s)", place_id); place_id = 0; place_try_t = 0; place_fails = 0; place_nbad = 0; }
+    if (cursor_id && cursor_id == place_id) {                // our own pickup is on the cursor: put it into a free inventory cell
+        if (place_try_t && now - place_try_t < 600) return 0;      // the last try is still being answered
+        if (place_try_t) {                                          // answered by nothing: the cell was refused (still on the cursor)
+            if (place_nbad < 16) { place_bad[place_nbad][0] = place_x; place_bad[place_nbad][1] = place_y; place_nbad++; }
+            place_fails++;
+        }
+        int fx, fy;
+        if (place_fails >= 5 || !inv_free_cell(&fx, &fy)) { say("could not put %u into the inventory (%d refused tries); it stays on the cursor", place_id, place_fails); place_id = 0; place_try_t = 0; place_fails = 0; place_nbad = 0; return 0; }
+        place_x = fx; place_y = fy; place_try_t = now;
+        memset(out, 0, 32);
+        out[0] = 0x18; out[1] = (uint8_t)place_id; out[2] = (uint8_t)(place_id >> 8); out[3] = (uint8_t)(place_id >> 16); out[4] = (uint8_t)(place_id >> 24);
+        out[5] = (uint8_t)fx; out[9] = (uint8_t)fy;               // x, y; the last dword (buffer 0 = the inventory) stays 0
+        say("PLACE id=%u at inventory cell (%d,%d)", place_id, fx, fy);
+        return 17;
+    }
     if (cursor_id) return 0;                                 // never risk putting something on the cursor
     int cooling = now - last_pick < 250;                     // gold can't land on the cursor, so it ignores the cooldown
 
@@ -550,6 +621,7 @@ int ap_tick(uint32_t now, uint8_t out[16]) {
     if (g->cls == 2) { scroll_pend_id = g->id; scroll_pend_kind = g->kind; }
     else if (g->cls == 3) { key_pend_id = g->id; key_pend_qty = g->qty; }
     else if (g->cls == 4) { /* gold: nothing to track */ }
+    else if (g->cls == 5) { place_id = g->id; place_t = now; place_try_t = 0; place_fails = 0; place_nbad = 0; }
     else { pot_pend_id = g->id; pot_pend_fitted = potion_fits(g->kind, g->tier); }
     memset(out, 0, 16);
     out[0] = 0x16; out[1] = 4;
@@ -634,4 +706,35 @@ int ap_monster_ids(const char *txt, int len, const char (*names)[24], int n, int
         line++; txt = eol + 1;
     }
     return found;
+}
+
+// Armor.txt / Weapons.txt / Misc.txt: the inventory size of every item (columns code, invwidth, invheight). Kept across games.
+int ap_parse_sizes(const char *txt, int len) {
+    int c_code = -1, c_w = -1, c_h = -1, line = 0, n = 0;
+    const char *end = txt + len;
+    while (txt < end) {
+        const char *eol = memchr(txt, '\n', (size_t)(end - txt));
+        if (!eol) eol = end;
+        const char *f = txt; char code[8] = {0}; int idx = 0, w = 0, h = 0;
+        for (const char *q = txt; q <= eol; q++) {
+            if (q != eol && *q != '\t') continue;
+            int fl = (int)(q - f); if (fl > 0 && f[fl - 1] == '\r') fl--;
+            if (line == 0) {
+                if (fl == 4 && !memcmp(f, "code", 4)) c_code = idx;
+                if (fl == 8 && !memcmp(f, "invwidth", 8)) c_w = idx;
+                if (fl == 9 && !memcmp(f, "invheight", 9)) c_h = idx;
+            } else if (idx == c_code) { memcpy(code, f, (size_t)(fl < 7 ? fl : 7)); }
+            else if (idx == c_w) w = atoi(f);
+            else if (idx == c_h) h = atoi(f);
+            idx++; f = q + 1;
+        }
+        if (line == 0 && (c_code < 0 || c_w < 0 || c_h < 0)) return 0;   // not a table with item sizes
+        if (line > 0 && code[0] && strlen(code) <= 4 && w > 0 && h > 0 && w <= 4 && h <= 4) {
+            int k = -1; for (int i = 0; i < sz_n; i++) if (!strcmp(sz_tab[i].code, code)) k = i;
+            if (k < 0 && sz_n < MAX_SZ) k = sz_n++;
+            if (k >= 0) { strcpy(sz_tab[k].code, code); sz_tab[k].w = (uint8_t)w; sz_tab[k].h = (uint8_t)h; n++; }
+        }
+        line++; txt = eol + 1;
+    }
+    return n;
 }

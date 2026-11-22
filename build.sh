@@ -22,4 +22,9 @@ if [ "${1:-}" = "nhamdebug" ]; then      # temporary diagnostic build for the ne
   $ZIG -shared -DNHAMDEBUG -o .out/nhamdebug/qol.dll src/qoltweaks.c src/core.c src/merc.c -luser32
   echo "built diagnostic: .out/nhamdebug/qol.dll"
 fi
+if [ "${1:-}" = "sounddebug" ]; then      # temporary diagnostic build: logs the game's sound calls (never goes in build/)
+  mkdir -p .out/sounddebug
+  $ZIG -shared -DSOUNDDEBUG -o .out/sounddebug/qol.dll src/qoltweaks.c src/core.c src/merc.c -luser32
+  echo "built diagnostic: .out/sounddebug/qol.dll"
+fi
 echo "built: build/qol.dll build/qol.ini build/qol.mpq"

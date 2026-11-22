@@ -10,6 +10,7 @@ typedef struct {
     int rejuv_always; // 1 = pick up every rejuvenation potion even if the belt has no room/column for it
     int gold;         // 1 = also pick up gold piles on the ground
     int poll_ms;      // how often (ms) to look for items to pick up; 0 = default (120)
+    int runes, gems, essences, shards;   // 1 = also pick up that kind of item and put it into a free inventory cell (each its own switch)
 } ap_config;
 
 // Logging callback supplied by the host (may be NULL).
@@ -39,10 +40,14 @@ void ap_on_recv(const uint8_t *p, int len);
 void ap_on_send(const uint8_t *p, int len);
 
 // Call frequently (e.g. on every receive poll). now_ms is a monotonic millisecond clock.
-// Returns the length (13) of a pickup packet written to out[], or 0 if nothing should be sent.
-int ap_tick(uint32_t now_ms, uint8_t out[16]);
+// Returns the length of a packet written to out[] (out must hold 32 bytes): 13 = pickup (0x16), 17 = put the item on the cursor into an inventory cell (0x18); 0 = nothing to send.
+int ap_tick(uint32_t now_ms, uint8_t out[32]);
 uint32_t ap_cursor_id(void);   // id of the item on the cursor (0 = none)
 int ap_cursor_busy(void);   // an item is currently on the cursor
+
+// Feed Armor.txt / Weapons.txt / Misc.txt (columns code, invwidth, invheight): the inventory sizes of items, so the free cells of the inventory can be worked out from
+// the item packets. Returns how many items were read, 0 if it isn't such a table. Unknown items count as 1x1.
+int ap_parse_sizes(const char *txt, int len);
 
 // Debug summary into buf.
 void ap_dump(char *buf, int n);

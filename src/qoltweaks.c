@@ -205,6 +205,9 @@ static int parse_monstats_cb(const char *txt, int len) {
     return n;
 }
 static int parse_misc_cb(const char *txt, int len) { return ap_parse_misc(txt, len); }
+static int parse_sizes_cb(const char *txt, int len) { return ap_parse_sizes(txt, len); }
+static int g_pick_inv;                                   // [pickup] runes / gems / essences / shards: any of them on needs the item sizes
+
 static int parse_itemtypes_cb(const char *txt, int len) { return merc_parse_itemtypes(txt, len); }
 // States.txt: the id column (2nd) of the row named "fullsetgeneric" (the glow a full set gives)
 static int parse_states_cb(const char *txt, int len) {
@@ -228,13 +231,14 @@ static int parse_skills_cb(const char *txt, int len) {
 // Called from the game thread (Storm's file functions are the game's own, so use them where the game does).
 // Retries for a while in case the archives aren't all mounted yet; gives up quietly after that.
 static void misc_tick(void) {
-    static int tries, done_misc, done_mon, done_it, done_sk, done_pm, done_st, done_dc, done_tz; static DWORD next;
+    static int tries, done_misc, done_mon, done_it, done_sk, done_pm, done_st, done_dc, done_tz, done_sz; static DWORD next;
+    if (!g_pick_inv) done_sz = 1;
     if (!g_merc_equip) done_it = 1;
     if (!g_glow_on) done_st = 1;
     if (!g_summons) done_sk = done_pm = 1;
     if (!g_dclone && !g_cheats) done_dc = 1;
     if (!g_tz && !g_horde && !g_cheats) done_tz = 1;
-    if ((done_misc && done_mon && done_it && done_sk && done_pm && done_st && done_dc && done_tz) || tries >= 30) return;
+    if ((done_misc && done_mon && done_it && done_sk && done_pm && done_st && done_dc && done_tz && done_sz) || tries >= 30) return;
     DWORD now = GetTickCount();
     if ((int)(now - next) < 0) return;
     next = now + 3000; tries++;
@@ -243,6 +247,17 @@ static void misc_tick(void) {
         if (n >= 0 || n == -2) done_misc = 1;
         if (n >= 0) logf_("Misc.txt: %d stack sizes set (attempt %d)", n, tries);
         else if (n == -1 && tries == 30) logf_("Misc.txt could not be read; stack sizes will be learned while playing");
+    }
+    if (!done_sz) {                                      // item sizes (Armor / Weapons / Misc) for the free-cell search of the rune / gem / essence / shard pickup
+        static const char *const f[3] = {"Data\\global\\excel\\Armor.txt", "Data\\global\\excel\\Weapons.txt", "Data\\global\\excel\\Misc.txt"};
+        static int got[3]; int all = 1;
+        for (int i = 0; i < 3; i++) {
+            if (got[i]) continue;
+            int n = storm_read(f[i], parse_sizes_cb);
+            if (n > 0) { got[i] = 1; logf_("%s: %d item sizes (attempt %d)", f[i], n, tries); } else if (n == -2) got[i] = 1; else all = 0;
+        }
+        if (all) done_sz = 1;
+        else if (tries == 30) logf_("item size tables could not be read; unknown items count as 1x1 cells");
     }
     if (!done_mon) {
         int n = storm_read("Data\\global\\excel\\MonStats.txt", parse_monstats_cb);
@@ -515,13 +530,13 @@ static int __stdcall h_recv(void *buf, int cap) {
     // pickup scan is actually due (something lies on the ground).
     int due = !g_dm_active_flag && ap_due(now);
     if (g_summons || due) live_player_pos();
-    uint8_t out[16];
+    uint8_t out[32];
     int n = due ? ap_tick(now, out) : 0;
     if (n > 0 && g_arg >= 0) {                           // only once we know how the game calls SendPacket
         g_injecting = 1;
         int sr = o_send(n, g_arg, out);
         g_injecting = 0;
-        logf_("sent pickup packet (%d bytes), result=%d", n, sr);
+        logf_("sent %s packet (%d bytes), result=%d", out[0] == 0x18 ? "place-item" : "pickup", n, sr);
     }
     if (g_logging) { prof_add(0, t0); prof_report(); }
     return r;
@@ -634,6 +649,11 @@ static void load_config(ap_config *c) {
     c->range = GetPrivateProfileIntA("pickup", "range", 4, path);
     c->rejuv_always = GetPrivateProfileIntA("pickup", "rejuv_always", 1, path);
     c->gold = GetPrivateProfileIntA("pickup", "gold", 1, path);
+    c->runes = GetPrivateProfileIntA("pickup", "runes", 0, path);
+    c->gems = GetPrivateProfileIntA("pickup", "gems", 0, path);
+    c->essences = GetPrivateProfileIntA("pickup", "essences", 0, path);
+    c->shards = GetPrivateProfileIntA("pickup", "shards", 0, path);
+    g_pick_inv = c->enabled && (c->runes || c->gems || c->essences || c->shards);
     g_pickup_in_town = GetPrivateProfileIntA("pickup", "pickup_in_town", 0, path);
     c->poll_ms = GetPrivateProfileIntA("pickup", "poll_ms", 120, path);
     g_logging = GetPrivateProfileIntA("qol", "logging", 0, path);
@@ -2194,6 +2214,61 @@ static DWORD WINAPI md_thread(LPVOID arg) {
 #endif
 
 
+
+#ifdef SOUNDDEBUG
+// ---- TEMPORARY diagnostic: which D2Sound call does the paladin aura pulse use? (build with ./build.sh sounddebug; never shipped) --------------
+// D2Sound's functions are mostly __fastcall (ecx, edx), so each D2Client import from D2Sound.dll (except the noisy list helpers) gets a pass-through stub that
+// writes "clock ordinal ecx edx stack-arg1" to sound.log, then jumps to the real function. Repeats of the previous line are dropped.
+static FILE *sd_log; static volatile LONG sd_lines; static void *sd_orig[128];
+static void __cdecl sd_note(DWORD ord, DWORD c, DWORD d, DWORD a) {
+    static char last[96]; char cur[96];
+    if (!sd_log || sd_lines > 3000000) return;
+    SYSTEMTIME t; GetLocalTime(&t);
+    snprintf(cur, sizeof cur, "#%lu %08lx %08lx %08lx", (unsigned long)ord, (unsigned long)c, (unsigned long)d, (unsigned long)a);
+    if (!strcmp(cur, last)) return;
+    strcpy(last, cur); sd_lines++;
+    fprintf(sd_log, "%02d:%02d:%02d.%03d %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, cur);
+    if ((sd_lines & 7) == 0) fflush(sd_log);
+}
+// sound FILES: D2Sound opens each wav through Storm (#267 SFileOpenFile / #268 SFileOpenFileEx); log the names (a sound is opened the first time it plays)
+static int (__stdcall *sd_o267)(const char *, void **); static int (__stdcall *sd_o268)(void *, const char *, DWORD, void **);
+static void sd_wav(const char *n) {
+    if (!sd_log || !n || IsBadReadPtr(n, 4)) return;
+    size_t l = strlen(n); if (l < 4 || l > 260 || lstrcmpiA(n + l - 4, ".wav")) return;
+    SYSTEMTIME t; GetLocalTime(&t);
+    fprintf(sd_log, "%02d:%02d:%02d.%03d WAV %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, n); fflush(sd_log);
+}
+static int __stdcall sd_h267(const char *n, void **ph) { sd_wav(n); return sd_o267(n, ph); }
+static int __stdcall sd_h268(void *m, const char *n, DWORD sc, void **ph) { sd_wav(n); return sd_o268(m, n, sc, ph); }
+static void sd_install(HMODULE client) {
+    sd_log = fopen("sound.log", "w"); if (!sd_log) return;
+    { static const char *mods[] = {"Fog.dll", "D2sound.dll", "D2Win.dll", "D2Client.dll", "D2Common.dll", "D2Lang.dll"};
+      for (unsigned i = 0; i < sizeof mods / sizeof mods[0]; i++) {
+          HMODULE m = GetModuleHandleA(mods[i]); if (!m) continue;
+          int x = hook_import_ordinal(m, "Storm.dll", 267, sd_h267, (void **)&sd_o267), y = hook_import_ordinal(m, "Storm.dll", 268, sd_h268, (void **)&sd_o268);
+          fprintf(sd_log, "wav-open hooks in %s: #267 %d, #268 %d\n", mods[i], x, y);
+      }
+      fflush(sd_log); }
+    BYTE *mem = VirtualAlloc(NULL, 16384, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE); if (!mem) return;
+    static const unsigned skip[] = {10002, 10007, 10019, 10020, 10026, 10017, 10022, 10009, 10015, 10036, 10039, 10044, 10047, 10049, 10054, 10064, 10027, 10056, 10045, 10062, 10065, 10057, 10053, 10061, 10048};
+    int n = 0, used = 0;
+    for (unsigned o = 10000; o < 10000; o++) {
+        int sk = 0; for (unsigned k = 0; k < sizeof skip / sizeof skip[0]; k++) if (skip[k] == o) sk = 1;
+        if (sk) continue;
+        BYTE *s = mem + used; used += 64; BYTE *p = s;
+        static const BYTE pushad = 0x60, popad = 0x61, argA[] = {0xFF, 0x74, 0x24, 0x24}, argD[] = {0xFF, 0x74, 0x24, 0x18}, argC[] = {0xFF, 0x74, 0x24, 0x20}, addesp[] = {0x83, 0xC4, 0x10};
+        p = emit(p, &pushad, 1);
+        p = emit(p, argA, 4); p = emit(p, argD, 4); p = emit(p, argC, 4);
+        p = emit_push(p, o);
+        p = emit_rel(p, 0xE8, (DWORD)sd_note);
+        p = emit(p, addesp, 3);
+        p = emit(p, &popad, 1);
+        *p++ = 0xFF; *p++ = 0x25; *(DWORD *)p = (DWORD)&sd_orig[o - 10000]; p += 4;
+        if (hook_import_ordinal(client, "D2sound.dll", o, s, &sd_orig[o - 10000])) n++;
+    }
+    fprintf(sd_log, "hooked %d D2Sound imports\n", n); fflush(sd_log);
+}
+#endif
 static DWORD WINAPI worker(LPVOID arg) {
     (void)arg;
     ap_config cfg;
@@ -2242,6 +2317,9 @@ static DWORD WINAPI worker(LPVOID arg) {
     if (!send || !recv_ord) { logf_("D2Net functions not recognised (unsupported game version?); giving up"); return 0; }
     logf_("hook send (inline D2Net#%u @%p): %d", send_ord, send, inline_hook(send, h_send, (void **)&o_send));
     logf_("hook recv (IAT D2Client->D2Net#%u): %d", recv_ord, hook_import_ordinal(client, "D2Net.dll", recv_ord, h_recv, (void **)&o_recv));
+#ifdef SOUNDDEBUG
+    sd_install(client);
+#endif
     return 0;
 }
 

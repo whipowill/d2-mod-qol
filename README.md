@@ -2,8 +2,6 @@
 
 A mod for Diablo II introducing various quality-of-life features and bug fixes.
 
-![Cover Art](https://i.imgur.com/bPM9M7S.jpeg)
-
 **Note this was designed for D2LOD v1.13 and will not work on version 1.14.**
 
 ## Features
@@ -37,9 +35,9 @@ All of these features are optional and toggled in the ``qol.ini`` file.
 
 These commands only work if ``cheats`` are turned on in the config file:
 
-- ``.god`` - make yourself invulnerable for fun
-- ``.xp on|off`` - control when you gain XP if you want to
-- ``.density 10`` - play custom monster density settings on the fly
+- ``.god`` - make yourself invulnerable
+- ``.xp on|off`` - control when you gain XP
+- ``.density 10`` - play custom monster density settings
 - ``.reset skills|stats`` - reset your skills and stats on demand
 - ``.dclone`` - force Diablo to walk the Earth
 

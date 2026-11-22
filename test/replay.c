@@ -16,7 +16,7 @@ int main(int argc, char **argv) {
         char *bar = strstr(line, "| "); uint8_t b[256]; int n = 0;
         if (!strncmp(line, "RECV id=", 8) && bar) { n = hexparse(bar + 2, b); ap_on_recv(b, n); }
         else if (!strncmp(line, "SEND id=", 8) && bar) { n = hexparse(bar + 2, b); ap_on_send(b, n); if (b[0] == 0x16) printf("%d: (player sent pickup of id %u)\n", ln, b[5] | b[6] << 8); }
-        uint8_t out[16];
+        uint8_t out[32];
         int k = ap_tick(now, out);
         if (k) { printf("%d: >>> WOULD SEND pickup id=%u\n", ln, out[5] | out[6] << 8); }
     }

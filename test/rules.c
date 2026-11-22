@@ -47,7 +47,7 @@ static void start(const char *beltcode) {
     uint8_t p[11] = {0x15, 0, 1, 0, 0, 0, 0x10, 0x27, 0x10, 0x27, 1}; ap_on_recv(p, 11);   // player at (10000,10000)
     if (beltcode) equip_belt(beltcode);
 }
-static int tick(void) { uint8_t o[16]; T += 800; int n = ap_tick(T, o); return n ? (int)(o[5] | o[6] << 8) : 0; }
+static int tick(void) { uint8_t o[32]; T += 800; int n = ap_tick(T, o); return n ? (int)(o[5] | o[6] << 8) : 0; }
 #define CHECK(name, cond) do { if (cond) printf("ok   %s\n", name); else { printf("FAIL %s\n", name); fails++; } } while (0)
 #define BELT(slot, id, code) recv_item(14, id, 2, slot, 0, 0, code)
 #define GROUND(id, dx, code) recv_item(0, id, 3, 0, 10000 + (dx), 10001, code)
@@ -64,6 +64,52 @@ static int idx_of(const char **codes, int n, const char *c) { for (int i = 0; i 
 static int MERC_CALL fake_chk(merc_item_t item, int type) { return (int)(item & 0xFFFF) == type; }
 static int MERC_CALL fake_two(merc_item_t item) { return (item & 0x10000) != 0; }
 
+
+// ---- runes / gems / essences / shards go to the cursor and are then put into a free inventory cell ----
+static void recv_at(int act, uint32_t id, int mode, int px, int py, int page, const char *code) {   // a stored (mode 0), cursor (4) item with a grid position
+    bw w; memset(&w, 0, sizeof w);
+    put(&w, 0x00200010, 32); put(&w, 0x69, 10); put(&w, mode, 3);
+    put(&w, 0, 4); put(&w, px, 4); put(&w, py, 4); put(&w, page, 3);
+    char c4[4] = {' ', ' ', ' ', ' '}; memcpy(c4, code, strlen(code));
+    for (int i = 0; i < 4; i++) put(&w, (uint8_t)c4[i], 8);
+    int nb = (w.pos + 7) / 8; uint8_t b[80] = {0};
+    b[0] = 0x9c; b[1] = act; b[2] = 8 + nb; b[3] = 0x10; memcpy(b + 4, &id, 4); memcpy(b + 8, w.b, nb); ap_on_recv(b, 8 + nb);
+}
+static void start_inv(int runes, int gems, int ess, int shards) {
+    ap_reset_learned();
+    ap_config c = {1, 4, 0, 0, 0, 0, runes, gems, ess, shards}; ap_init(&c, quiet);
+    uint8_t g[8] = {0x01, 0, 4, 0, 0x10, 0, 1, 0}; ap_on_recv(g, 8);
+    uint8_t p[11] = {0x15, 0, 1, 0, 0, 0, 0x10, 0x27, 0x10, 0x27, 1}; ap_on_recv(p, 11);
+}
+static int tickp(uint8_t *o) { T += 800; return ap_tick(T, o); }
+static void inv_tests(void) {
+    uint8_t o[32]; int n;
+    start_inv(1, 1, 1, 1); GROUND(300, 2, "r05");
+    n = tickp(o); CHECK("a rune on the ground is picked up (0x16)", n == 13 && o[0] == 0x16 && (o[5] | o[6] << 8) == 300);
+    recv_at(0x12, 300, 4, 0, 0, 0, "r05");
+    n = tickp(o); CHECK("then put into the inventory cell at the bottom right (0x18, x 9, y 3, buffer 0)", n == 17 && o[0] == 0x18 && (o[1] | o[2] << 8) == 300 && o[5] == 9 && o[9] == 3 && o[13] == 0);
+    n = tickp(o); CHECK("after no answer the cell is treated as refused and the next free cell is tried", n == 17 && o[5] == 9 && o[9] == 2);
+    recv_at(0x04, 300, 0, 9, 2, 1, "r05");
+    n = tickp(o); CHECK("done: nothing more to send", n == 0);
+    start_inv(1, 1, 1, 1); for (int i = 0; i < 40; i++) recv_at(0x04, 400 + i, 0, i % 10, i / 10, 1, "jew"); GROUND(301, 2, "r05");
+    n = tickp(o); CHECK("no free cell known: the pickup is still tried (the game decides)", n == 13 && o[0] == 0x16 && (o[5] | o[6] << 8) == 301);
+    start_inv(1, 1, 1, 1); { const char *t = "name\tcode\tinvwidth\tinvheight\r\nBig\tbig\t2\t3\r\n"; CHECK("sizes read", ap_parse_sizes(t, (int)strlen(t)) == 1); }
+    recv_at(0x04, 500, 0, 8, 1, 1, "big"); recv_at(0x04, 501, 0, 9, 0, 1, "jew"); recv_at(0x04, 502, 0, 8, 0, 1, "jew"); GROUND(302, 2, "gpv");
+    n = tickp(o); CHECK("a gem is picked up", n == 13 && o[0] == 0x16);
+    recv_at(0x12, 302, 4, 0, 0, 0, "gpv");
+    n = tickp(o); CHECK("a 2x3 item at (8,1) blocks (8..9, 1..3): the first free cell from the bottom right is (7,3)", n == 17 && o[5] == 7 && o[9] == 3);
+    start_inv(0, 1, 0, 0); GROUND(303, 2, "r05"); GROUND(304, 3, "tes"); GROUND(305, 4, "wss");
+    n = tickp(o); CHECK("runes / essences / shards stay when only gems are on", n == 0);
+    start_inv(0, 0, 1, 1); GROUND(306, 2, "fed");
+    n = tickp(o); CHECK("an essence is picked up when essences are on", n == 13 && (o[5] | o[6] << 8) == 306);
+    start_inv(0, 0, 0, 1); GROUND(307, 2, "wss");
+    n = tickp(o); CHECK("a Worldstone Shard is picked up when shards are on", n == 13 && (o[5] | o[6] << 8) == 307);
+    start("lbl"); BELT(0, 100, "hp1"); for (int i = 0; i < 70; i++) GROUND(600 + i, 3, "gpv"); GROUND(701, 2, "hp1");
+    CHECK("switched-off gems do not use up the ground list: the potion is still picked up", tick() == 701);
+    start_inv(1, 1, 1, 1); GROUND(308, 2, "sku");
+    n = tickp(o); CHECK("a skull is a gem", n == 13);
+    start_inv(1, 1, 1, 1); GROUND(303, 2, "glw"); n = tickp(o); CHECK("a flawless diamond (glw) is picked up", n == 13 && o[0] == 0x16 && (o[5] | o[6] << 8) == 303);
+}
 int main(void) {
     // ---- potions need a belt column that already holds that kind and has a free row ----
     start("lbl"); BELT(0, 100, "hp1"); GROUND(50, 2, "hp1");
@@ -385,6 +431,7 @@ int main(void) {
     // a stray single 0x00 byte must not wipe state (it arrives constantly during play)
     start("lbl"); BELT(0, 100, "hp1"); { uint8_t z[1] = {0}; ap_on_recv(z, 1); } GROUND(87, 2, "hp1");
     CHECK("lone 0x00 byte does not reset state", tick() == 87);
+    inv_tests();
     printf(fails ? "\n%d FAILED\n" : "\nall passed\n", fails);
     return fails != 0;
 }

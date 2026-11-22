@@ -24,6 +24,8 @@ so there is no anti-cheat concern.
 | feature | ini | status |
 |---|---|---|
 | potion / scroll / key auto-pickup (belt-aware, learned stack limits) | `[pickup]` | **[confirmed]** (PD2 and LoD) |
+| runes, gems, evil essences and Worldstone Shards picked up and put into a free inventory cell (packet 0x18 buffer 0; the inventory cells come from the item packets and the item sizes from Armor / Weapons / Misc.txt) | `[pickup] runes` / `gems` / `essences` / `shards` | built 2026-11-22, unit-tested with synthetic packets, awaiting in-game test (NOTES section 25) |
+| runes, gems, evil essences and Worldstone Shards picked up and put into a free inventory cell (packet 0x18 buffer 0; the inventory cells come from the item packets and the item sizes from Armor / Weapons / Misc.txt) | `[pickup] runes` / `gems` / `essences` / `shards` | built 2026-11-22, unit-tested with synthetic packets, awaiting in-game test (NOTES section 25) |
 | hold-key clicker (spacebar by default) | `[clicker]` | **[confirmed]** |
 | merc running fix | `[mercenary] run` | **[confirmed]** |
 | no XP level penalty (in-memory hex edit) | `[experience] no_level_penalty` | **[confirmed]** (reproduces the user's edit) |
