@@ -109,6 +109,8 @@ static void inv_tests(void) {
     start_inv(1, 1, 1, 1); GROUND(308, 2, "sku");
     n = tickp(o); CHECK("a skull is a gem", n == 13);
     start_inv(1, 1, 1, 1); GROUND(303, 2, "glw"); n = tickp(o); CHECK("a flawless diamond (glw) is picked up", n == 13 && o[0] == 0x16 && (o[5] | o[6] << 8) == 303);
+    start_inv(1, 1, 1, 1); GROUND(305, 2, "glv"); n = tickp(o); CHECK("a Glaive (glv) is not a gem and is left alone", n == 0);
+    start_inv(1, 1, 1, 1); GROUND(306, 2, "gzv"); n = tickp(o); CHECK("a flawless amethyst (gzv) is picked up", n == 13 && o[0] == 0x16);
 }
 int main(void) {
     // ---- potions need a belt column that already holds that kind and has a free row ----

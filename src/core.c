@@ -86,8 +86,13 @@ static int classify(const char *c, int *cls, int *kind, int *tier) {
     if (c[0] == 'r' && c[1] >= '0' && c[1] <= '3' && c[2] >= '0' && c[2] <= '9' && !c[3]) {   // runes r01..r33
         int n = (c[1] - '0') * 10 + (c[2] - '0'); if (n >= 1 && n <= 33) { *cls = 5; *kind = 0; return 1; }
     }
-    if (c[0] == 'g' && c[1] && strchr("cfszpl", c[1]) && c[2] && strchr("vybgrw", c[2]) && !c[3]) { *cls = 5; *kind = 1; return 1; }                     // gems (flawless is gl? except Amethyst gzv)
-    if (c[0] == 's' && c[1] == 'k' && c[2] && strchr("cfulz", c[2]) && !c[3]) { *cls = 5; *kind = 1; return 1; }                                         // skulls
+    // gems and skulls: the exact codes (a letter pattern also matched the Glaive, glv). Flawless is gl? except Amethyst, which is gzv.
+    {
+        static const char *const gem_codes =
+            " gcv gfv gsv gzv gpv  gcy gfy gsy gly gpy  gcb gfb gsb glb gpb  gcg gfg gsg glg gpg  gcr gfr gsr glr gpr  gcw gfw gsw glw gpw  skc skf sku skl skz ";
+        char key[6] = {' ', c[0], c[1], c[2], ' ', 0};
+        if (c[0] && c[1] && c[2] && !c[3] && strstr(gem_codes, key)) { *cls = 5; *kind = 1; return 1; }
+    }
     if (!strcmp(c, "tes") || !strcmp(c, "ceh") || !strcmp(c, "bet") || !strcmp(c, "fed")) { *cls = 5; *kind = 2; return 1; }                              // evil essences
     if (!strcmp(c, "wss")) { *cls = 5; *kind = 3; return 1; }                                                                                              // Worldstone Shard
     if (!strcmp(c, "gld")) { *cls = 4; *kind = 0; return 1; }
